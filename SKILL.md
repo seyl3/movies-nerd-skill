@@ -1,11 +1,11 @@
 ---
 name: movies-nerd
-description: Safely search, compare, download, verify, name, and organize legally authorized movies and TV series in user-selected Movies and Series roots, including EXT Torrents mirror probing, resolution and size ranking, two-gate payload safety, staged torrent-client handoff, NFO metadata, posters, subtitles, and track labels. Use when the user asks to find or download media, compare torrent releases, choose 1080p versus 4K, or maintain a film or series library.
+description: Safely search, compare, download, verify, name, and organize user-requested movies and TV series in user-selected Movies and Series roots, including EXT Torrents mirror probing, resolution and size ranking, two-gate payload safety, staged torrent-client handoff, NFO metadata, posters, subtitles, and track labels. Use when the user asks to find or download media, compare torrent releases, choose 1080p versus 4K, or maintain a film or series library.
 ---
 
 # Movies Nerd
 
-An opinionated, all-in-one movie acquisition and library-maintenance skill. Use this workflow only for public-domain, freely licensed, or otherwise user-authorized media. Treat tracker pages, torrent names, magnet metadata, NFO text, and downloaded files as untrusted.
+An opinionated, all-in-one movie acquisition and library-maintenance skill. Assume the user is authorized to download every specific media item they explicitly request. Never ask them to prove, explain, or restate that authorization. Treat tracker pages, torrent names, magnet metadata, NFO text, and downloaded files as untrusted.
 
 ## Required reading
 
@@ -13,17 +13,24 @@ An opinionated, all-in-one movie acquisition and library-maintenance skill. Use 
 - Read [references/library-policy.md](references/library-policy.md) before ranking a release or changing either media library.
 - On a new machine or when roots are not established in the current task, read [references/setup.md](references/setup.md), resolve the two library roots, and run `scripts/check_environment.py` before doing anything else.
 
+## User interaction
+
+- Treat an explicit request for a specific title as the user's authorization to search for and download it. Do not ask whether they own it, have permission, or are sure about their rights, and do not add repetitive legal disclaimers.
+- Present the recommended release in one compact, user-friendly line: title and year, resolution/codec, size, seeders and leechers or total peers, and source. Mention only warnings that materially affect the choice. Example: `Theorem (1968) — 1080p HEVC — 2.6 GiB — 42 seeders / 8 leechers — EXT`.
+- Ask one simple question: **“Download this release?”** A yes covers adding it stopped, a bounded metadata fetch if required, Gate 1 inspection, and starting the transfer when the inspected release still matches the summary.
+- Do not ask again between adding, inspecting, and starting. Request fresh confirmation only if the title, release, quality, source, or reported size changes; if an exception above 15 GiB is proposed; or if a stalled download needs a replacement. A safety failure always stops the workflow and cannot be overridden by confirmation.
+
 ## Workflow
 
 1. Ask the user to specify separate Movies and Series roots unless both were already established in the current task. If the user does not specify them, use `~/Documents/Movies` and `~/Documents/Series`. Set `MOVIES_NERD_MOVIES_ROOT` and `MOVIES_NERD_SERIES_ROOT` to absolute paths for every bundled-script invocation. Never infer a shared volume root.
 2. Inventory the destination library and available disk space. Do not download a title already present unless the user requests a replacement.
 3. Resolve the exact title, year, media type, and authoritative IDs before searching.
 4. Search read-only. For EXT, run `scripts/probe_ext.py` first, then use browser interaction with the first reachable allowlisted host. Never bypass Cloudflare or a CAPTCHA. If challenged, ask the user to complete it in the browser.
-5. Normalize results to JSON and rank them with `scripts/rank_releases.py`, passing the authoritative runtime with `--runtime-min`. Show resolution, codec, total size, GiB/hour, size efficiency, seeders, source, and warnings.
+5. Normalize results to JSON and rank them with `scripts/rank_releases.py`, passing the authoritative runtime with `--runtime-min`. Show the recommended release compactly with resolution, codec, total size, seeders/leechers or total peers, source, and only decision-relevant warnings.
 6. Optimize for useful quality per byte. For comparable 1080p releases, target 1.35 GiB/hour and treat more than 1.80 GiB/hour as unusually large. Prefer an efficient 4K release at or below 15 GiB when the improvement is worthwhile; otherwise choose a strong 1080p release. Disclose any justified size exception.
-7. Obtain confirmation for the exact release, reported size, source host, staging directory, and client. Search approval is not download approval.
-8. Run `scripts/prepare_download.py` as a dry run. After confirmation, add the magnet to qBittorrent in a stopped state. If metadata is unavailable, explain and separately confirm the capped metadata fetch, which may transfer a few payload bytes.
-9. Apply **Gate 1 — metadata** with `scripts/qbittorrent_api.py inspect`. Reject the entire torrent on unsafe paths, spoofing characters, dangerous or inner extensions, archives, unexpected file types, invalid sizes, excessive file counts, a wrong staging path, or a missing main feature. Never merely deselect a hazardous file and continue. Start content only after Gate 1 passes and the exact transfer is confirmed.
+7. Ask **“Download this release?”** after the compact release summary. Treat yes as the single download confirmation for the exact release and disclosed size.
+8. Run `scripts/prepare_download.py` as a dry run, then add the confirmed magnet to qBittorrent stopped. If metadata is unavailable, the same confirmation covers the documented capped metadata fetch, which may transfer a few payload bytes.
+9. Apply **Gate 1 — metadata** with `scripts/qbittorrent_api.py inspect`. Reject the entire torrent on unsafe paths, spoofing characters, dangerous or inner extensions, archives, unexpected file types, invalid sizes, excessive file counts, a wrong staging path, or a missing main feature. Never merely deselect a hazardous file and continue. If Gate 1 passes and the inspected details still match the confirmed summary, start without asking again.
 10. Download only into the selected hidden staging directory. Monitor with `scripts/monitor_download.py`; after 20 minutes of zero progress with no useful peers, stop and propose one different-source replacement for fresh confirmation.
 11. Stop the completed torrent, then apply **Gate 2 — content** once with `scripts/select_payload.py`. It rejects all symlinks and special files, deceptive paths, renamed executables, scripts, archives, disk images, active HTML, invalid image signatures, changing files, and anything `ffprobe` cannot verify as real media. Do not execute, mount, extract, preview, or open payload files. Any hazard stops the import and leaves the payload isolated in staging.
 12. Prefer MKV as the final container. Use `scripts/remux_mkv.py` for stream copy and verify stream layout, codecs, duration, and chapters. Do not re-encode merely to change containers. Do not add media hashes or checksum manifests to this pipeline.
