@@ -1,0 +1,6 @@
+(version 1)
+(allow default)
+(deny file-write*)
+(allow file-write*
+  (subpath "/Volumes/ssd/Films/.incoming/Movies Nerd")
+  (subpath "/Volumes/ssd/Séries/.incoming/Movies Nerd"))
