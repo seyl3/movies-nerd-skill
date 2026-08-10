@@ -2,20 +2,26 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 import xml.etree.ElementTree as ET
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
+import _common
 import qbittorrent_api as qbt
 import clean_clutter
 import monitor_download
+import opensubtitles_api
 import rank_releases
 import refresh_checksums
+import subtitle_provider
+import validate_subtitle
 import write_nfo
 
 
@@ -59,6 +65,28 @@ class QbittorrentSafetyTests(unittest.TestCase):
 
 
 class PolicyTests(unittest.TestCase):
+    def test_library_roots_default_to_documents(self):
+        movies, series = _common.library_roots({})
+        self.assertEqual(movies, Path.home() / "Documents" / "Movies")
+        self.assertEqual(series, Path.home() / "Documents" / "Series")
+
+    def test_library_roots_accept_separate_custom_paths(self):
+        env = {
+            _common.MOVIES_ROOT_ENV: "/private/tmp/media/Movies",
+            _common.SERIES_ROOT_ENV: "/private/tmp/media/Series",
+        }
+        movies, series = _common.library_roots(env)
+        self.assertEqual(movies, Path("/private/tmp/media/Movies"))
+        self.assertEqual(series, Path("/private/tmp/media/Series"))
+
+    def test_library_roots_reject_nested_paths(self):
+        env = {
+            _common.MOVIES_ROOT_ENV: "/private/tmp/media",
+            _common.SERIES_ROOT_ENV: "/private/tmp/media/Series",
+        }
+        with self.assertRaises(ValueError):
+            _common.library_roots(env)
+
     def test_rank_prefers_eligible_4k_then_1080p(self):
         candidates = [
             {"title": "Film 1080p x264", "size": "7 GiB", "seeders": 100},
@@ -69,6 +97,18 @@ class PolicyTests(unittest.TestCase):
         ranked.sort(key=lambda item: (item["eligible"], item["score"]), reverse=True)
         self.assertEqual(ranked[0]["resolution"], "2160p")
         self.assertFalse(ranked[-1]["eligible"])
+
+    def test_rank_penalizes_bloated_encode_for_same_quality(self):
+        candidates = [
+            {"title": "Film 2024 1080p x265 WEB-DL", "size": "5 GiB", "seeders": 100},
+            {"title": "Film 2024 1080p x265 WEB-DL", "size": "2.5 GiB", "seeders": 60},
+        ]
+        ranked = [rank_releases.normalize(item, 15 * qbt.GIB, 90) for item in candidates]
+        ranked.sort(key=lambda item: (item["eligible"], item["score"]), reverse=True)
+        self.assertEqual(ranked[0]["size"], "2.50 GiB")
+        self.assertEqual(ranked[0]["size_efficiency"]["rating"], "balanced")
+        self.assertEqual(ranked[1]["size_efficiency"]["rating"], "bloated")
+        self.assertTrue(any("large for its runtime" in warning for warning in ranked[1]["warnings"]))
 
     def test_nfo_escapes_untrusted_text(self):
         payload = write_nfo.render("movie", {"title": "A & B <C>", "year": 2024})
@@ -111,6 +151,47 @@ class PolicyTests(unittest.TestCase):
             (root / "Film.en.srt").write_text("subtitle", encoding="utf-8")
             names = [path.name for path in clean_clutter.targets(root)]
             self.assertEqual(names, [".DS_Store", "Film.pt.srt"])
+
+    def test_subtitle_provider_asks_once_then_falls_back(self):
+        ask = subtitle_provider.plan("Example", 2024, "Example.2024.1080p", ["en", "fr"], False, {})
+        fallback = subtitle_provider.plan("Example", 2024, "Example.2024.1080p", ["en", "fr"], True, {})
+        self.assertEqual(ask["action"], "ask-user-once")
+        self.assertEqual(fallback["action"], "browser-fallback")
+        self.assertEqual(fallback["provider"], "Subtitle Cat")
+
+    def test_subtitle_provider_uses_but_never_outputs_key(self):
+        secret = "not-for-output"
+        result = subtitle_provider.plan("Example", 2024, None, ["en"], False, {"OPENSUBTITLES_API_KEY": secret})
+        self.assertEqual(result["action"], "use-opensubtitles-api")
+        self.assertNotIn(secret, json.dumps(result))
+
+    def test_valid_srt_and_html_rejection(self):
+        cues = "\n\n".join(
+            f"{index}\n00:00:{index:02d},000 --> 00:00:{index:02d},800\nLine {index}."
+            for index in range(1, 7)
+        ).encode()
+        valid = validate_subtitle.validate_bytes(cues, "en", media_duration=7)
+        invalid = validate_subtitle.validate_bytes(b"<!doctype html><html>Cloudflare</html>", "fr")
+        self.assertTrue(valid["valid"])
+        self.assertTrue(valid["counts_as_full_coverage"])
+        self.assertFalse(invalid["valid"])
+
+    def test_opensubtitles_requires_environment_key(self):
+        with self.assertRaises(opensubtitles_api.SubtitleApiError):
+            opensubtitles_api.api_key({})
+
+    def test_opensubtitles_destination_is_staging_only(self):
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            env = {
+                _common.MOVIES_ROOT_ENV: str(base / "Movies"),
+                _common.SERIES_ROOT_ENV: str(base / "Series"),
+            }
+            output = base / "Movies" / ".incoming" / "Movies Nerd" / "Example.en.srt"
+            with patch.dict(os.environ, env, clear=False):
+                self.assertEqual(opensubtitles_api.checked_destination(str(output), "en"), output.resolve(strict=False))
+                with self.assertRaises(opensubtitles_api.SubtitleApiError):
+                    opensubtitles_api.checked_destination(str(base / "outside.en.srt"), "en")
 
 
 if __name__ == "__main__":

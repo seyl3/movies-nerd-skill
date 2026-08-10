@@ -13,6 +13,16 @@ Optional on macOS: `/usr/bin/sandbox-exec`. The launcher uses it as defense in d
 
 No Node.js, npm packages, Docker image, browser extension, cloned scraper server, or Python package is required.
 
+## Configure subtitles
+
+An OpenSubtitles API key is optional. If one is available, expose it through the current shell or an approved secret manager:
+
+```sh
+export OPENSUBTITLES_API_KEY='<your key from opensubtitles.com>'
+```
+
+Do not put the real key in this repository, a media filename, NFO, command-line argument, or provider URL. When no key is configured, Movies Nerd asks once whether the user has one. If not, it continues through the no-key Subtitle Cat browser workflow; no extra package or account is required.
+
 ## Suggested manual installation
 
 Review commands before running them and use the package manager already trusted on the machine.
@@ -56,14 +66,16 @@ Never commit those values, put them in magnet URLs, or paste them into metadata 
 
 ## Prepare the library paths
 
-The opinionated defaults are:
+Before library work, Movies Nerd asks the user for two separate absolute paths. Configure them for the current shell with:
 
-- Movies: `/Volumes/ssd/Films`
-- Series: `/Volumes/ssd/Séries`
-- Movie staging: `/Volumes/ssd/Films/.incoming/Movies Nerd`
-- Series staging: `/Volumes/ssd/Séries/.incoming/Movies Nerd`
+```sh
+export MOVIES_NERD_MOVIES_ROOT='/absolute/path/to/Movies'
+export MOVIES_NERD_SERIES_ROOT='/absolute/path/to/Series'
+```
 
-Create or mount the two library roots before the first transfer. Movies Nerd creates only the hidden staging subdirectory when a confirmed transfer is prepared.
+If the user does not specify paths, use `~/Documents/Movies` and `~/Documents/Series`. Staging is always `.incoming/Movies Nerd` inside the applicable selected root. The roots must be distinct, non-nested directories; never use a home directory, filesystem root, or shared volume root as a library root.
+
+Create or mount the selected roots before the first transfer. Movies Nerd creates only the hidden staging subdirectory when a confirmed transfer is prepared.
 
 ## Verify the machine
 
@@ -73,6 +85,7 @@ From the installed skill directory, run:
 python3 scripts/check_environment.py
 scripts/run_sandboxed.sh check-environment
 python3 scripts/qbittorrent_api.py status
+python3 scripts/subtitle_provider.py --title 'Example' --year 2024
 ```
 
 The checker is read-only. A failed qBittorrent status usually means the application is closed, the Web UI is disabled, the port differs, or the environment credentials are missing.

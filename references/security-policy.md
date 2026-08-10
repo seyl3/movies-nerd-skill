@@ -14,13 +14,19 @@
 - Never bypass Cloudflare, CAPTCHAs, access controls, geographic blocks, or browser safety warnings.
 - Never auto-discover torrent mirrors. Only use this HTTPS allowlist: `ext.to`, `search.extto.com`, and `extto.com`. Ask before changing it.
 - Never transmit library filenames, checksums, API keys, browser cookies, or private filesystem data to a tracker.
+- Read an OpenSubtitles key only from `OPENSUBTITLES_API_KEY` or an approved ephemeral secret input. Never print it, place it in a URL or command-line argument, persist it in the repository, or send it to a fallback provider.
+- Allow subtitle network access only to `api.opensubtitles.com` and HTTPS subdomains of `opensubtitles.com`, or through an interactive browser on `subtitlecat.com` and `www.subtitlecat.com`. Ask before adding another provider domain.
+- Treat subtitle pages and downloads as untrusted. Never upload a media file, embedded subtitle, sidecar, library inventory, or release history to Subtitle Cat without separate explicit approval.
 
 ## Download boundary
 
-- Movies stage under `/Volumes/ssd/Films/.incoming/Movies Nerd`.
-- Series stage under `/Volumes/ssd/Séries/.incoming/Movies Nerd`.
+- Ask for distinct Movies and Series roots before library work. If none are specified, default to `~/Documents/Movies` and `~/Documents/Series`.
+- Read absolute roots from `MOVIES_NERD_MOVIES_ROOT` and `MOVIES_NERD_SERIES_ROOT`. Reject filesystem roots, home directories, shared mount roots, equal paths, and nested roots.
+- Stage each download under `.incoming/Movies Nerd` inside its applicable selected root.
+- Stage subtitle downloads below the corresponding Movies Nerd staging root. Accept direct `.srt` files only by default; reject archives, HTML responses, scripts, and executable signatures.
 - Reject absolute payload paths, `..` traversal, control characters, and symlinks escaping the staging directory.
 - Default maximum reported payload size is 15 GiB. An override requires the user to approve the exact larger size.
+- Pass the authoritative runtime to release ranking and compare GiB/hour. Treat the collection-informed efficiency thresholds as strong preferences, while requiring a real source-quality advantage before accepting a materially larger comparable encode.
 - Require enough free space for the payload plus 10 GiB of working headroom.
 - Prefer a client that can fetch metadata before content. Compare the client-reported size and file list with the selected result; cancel on a material mismatch.
 - Add magnets stopped, inspect metadata, deselect extras, and start only after explicit confirmation. The bundled qBittorrent client deliberately exposes no delete operation.
