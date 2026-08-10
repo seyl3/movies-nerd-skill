@@ -1,6 +1,6 @@
 ---
 name: movies-nerd
-description: Safely search, compare, download, verify, name, and organize user-requested movies and TV series in user-selected Movies and Series roots, including EXT Torrents mirror probing, resolution and size ranking, two-gate payload safety, staged torrent-client handoff, NFO metadata, posters, subtitles, and track labels. Use when the user asks to find or download media, compare torrent releases, choose 1080p versus 4K, or maintain a film or series library.
+description: Safely search, compare, download, verify, name, and organize user-requested movies and TV series in user-selected Movies and Series roots, including EXT Torrents mirror probing, resolution and size ranking, two-gate payload safety, staged torrent-client handoff, NFO metadata, posters, subtitles, track labels, and post-download film recommendations. Use when the user asks to find or download media, compare torrent releases, choose 1080p versus 4K, or maintain a film or series library.
 ---
 
 # Movies Nerd
@@ -20,6 +20,7 @@ Target this skill at film fans and collectors who are not expected to understand
 
 - Read [references/security-policy.md](references/security-policy.md) before any search or download.
 - Read [references/library-policy.md](references/library-policy.md) before ranking a release or changing either media library.
+- Read [references/recommendations.md](references/recommendations.md) after successfully importing a movie.
 - On a new machine or when roots are not established in the current task, read [references/setup.md](references/setup.md), resolve the two library roots, and run `scripts/check_environment.py` before doing anything else.
 
 ## User interaction
@@ -47,6 +48,7 @@ Target this skill at film fans and collectors who are not expected to understand
 14. Audit English and French subtitle coverage with `scripts/check_subtitles.py` and follow [references/subtitles.md](references/subtitles.md). Use the configured OpenSubtitles key when available; otherwise ask once and use the approved Subtitle Cat browser fallback. Validate every SRT before installing it and remove Portuguese sidecars unless requested.
 15. Add NFO metadata and artwork, normalize embedded track labels, and follow `library-policy.md`.
 16. Remove only confirmed release debris and macOS sidecars. Preserve the staged source whenever validation fails.
+17. After a movie is successfully imported, follow [references/recommendations.md](references/recommendations.md). Briefly recommend one similar film and one other worthwhile film by the same director, excluding titles already in the library. Give verified direct Letterboxd and SensCritique links for each. Keep the recommendation read-only and do not offer to download either film unless the user asks.
 
 ## Bundled scripts
 
