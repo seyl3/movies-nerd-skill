@@ -1,0 +1,6 @@
+(version 1)
+(allow default)
+(deny file-write*)
+(allow file-write*
+  (subpath (param "MOVIE_STAGE"))
+  (subpath (param "SERIES_STAGE")))

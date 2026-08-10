@@ -14,6 +14,9 @@ case "$ACTION" in
   rank-releases) MODE=offline; SCRIPT=rank_releases.py ;;
   select-payload) MODE=offline; SCRIPT=select_payload.py ;;
   check-subtitles) MODE=offline; SCRIPT=check_subtitles.py ;;
+  subtitle-provider) MODE=offline; SCRIPT=subtitle_provider.py ;;
+  validate-subtitle) MODE=offline; SCRIPT=validate_subtitle.py ;;
+  opensubtitles) MODE=subtitle-network; SCRIPT=opensubtitles_api.py ;;
   plan-library) MODE=offline; SCRIPT=plan_library.py ;;
   write-nfo) MODE=library; SCRIPT=write_nfo.py ;;
   clean-clutter) MODE=library; SCRIPT=clean_clutter.py ;;
