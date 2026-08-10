@@ -12,17 +12,17 @@ import re
 import sys
 import tempfile
 
-ROOTS = (Path("/Volumes/ssd/Films"), Path("/Volumes/ssd/Séries"))
+from _common import library_roots
 MANIFEST = "SHA256SUMS.txt"
 CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 
 def checked_root(raw: str) -> Path:
     candidate = Path(raw).resolve(strict=True)
-    for root in ROOTS:
+    for root in library_roots():
         if candidate == root.resolve(strict=False):
             return candidate
-    raise ValueError("root must be exactly the configured Films or Séries root")
+    raise ValueError("root must be exactly the configured Movies or Series root")
 
 
 def included(path: Path, root: Path) -> bool:

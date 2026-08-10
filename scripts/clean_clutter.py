@@ -11,18 +11,18 @@ from pathlib import Path
 import re
 import sys
 
-ROOTS = (Path("/Volumes/ssd/Films"), Path("/Volumes/ssd/Séries"))
+from _common import library_roots
 SUBTITLE_SUFFIXES = {".srt", ".ass", ".ssa", ".vtt", ".sub"}
 PORTUGUESE_RE = re.compile(r"(?:^|[._ -])(pt|por|pob|portuguese)(?:$|[._ -])", re.I)
 
 
 def root_for(path: Path) -> Path:
     resolved = path.resolve(strict=True)
-    for root in ROOTS:
+    for root in library_roots():
         fixed = root.resolve(strict=False)
         if resolved == fixed or fixed in resolved.parents:
             return root
-    raise ValueError("target must be inside the configured Films or Séries root")
+    raise ValueError("target must be inside the configured Movies or Series root")
 
 
 def targets(base: Path) -> list[Path]:

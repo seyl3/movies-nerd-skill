@@ -18,10 +18,8 @@ from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import HTTPCookieProcessor, Request, build_opener
 import uuid
 
-from _common import GIB, format_gib, parse_size
+from _common import GIB, format_gib, staging_roots
 
-MOVIE_STAGE = Path("/Volumes/ssd/Films/.incoming/Movies Nerd")
-SERIES_STAGE = Path("/Volumes/ssd/Séries/.incoming/Movies Nerd")
 MAX_BYTES = 15 * GIB
 LOOPBACKS = {"127.0.0.1", "::1", "localhost"}
 VIDEO_EXTENSIONS = {".mkv", ".mp4", ".m4v", ".mov", ".avi", ".webm", ".ts", ".m2ts"}
@@ -150,7 +148,8 @@ def client_from_env() -> QbtClient:
 
 
 def safe_stage(kind: str) -> Path:
-    return MOVIE_STAGE if kind == "movie" else SERIES_STAGE
+    movie_stage, series_stage = staging_roots()
+    return movie_stage if kind == "movie" else series_stage
 
 
 def classify_files(files: list[dict], series: bool = False) -> dict:
@@ -224,7 +223,7 @@ def validate_torrent(client: QbtClient, torrent_hash: str, allow_oversize: bool 
     files = classify_files(torrent_files(client, torrent_hash), series=series)
     if not files["files"]:
         raise QbtError("torrent metadata is not available yet; leave it stopped briefly and inspect again")
-    stage_roots = (MOVIE_STAGE.resolve(strict=False), SERIES_STAGE.resolve(strict=False))
+    stage_roots = tuple(root.resolve(strict=False) for root in staging_roots())
     raw_save = Path(str(info.get("save_path", ""))).resolve(strict=False)
     if not any(raw_save == root or root in raw_save.parents for root in stage_roots):
         raise QbtError(f"torrent save path is outside Movies Nerd staging: {raw_save}")

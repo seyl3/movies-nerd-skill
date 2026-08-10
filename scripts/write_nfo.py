@@ -11,7 +11,7 @@ import sys
 import tempfile
 import xml.etree.ElementTree as ET
 
-ROOTS = (Path("/Volumes/ssd/Films"), Path("/Volumes/ssd/Séries"))
+from _common import library_roots
 SCALARS = {
     "movie": ("title", "originaltitle", "sorttitle", "year", "plot", "premiered", "runtime", "rating", "studio", "country"),
     "tvshow": ("title", "originaltitle", "year", "plot", "premiered", "status", "runtime", "rating", "studio"),
@@ -51,8 +51,8 @@ def checked_output(raw: str) -> Path:
     output = Path(raw).resolve(strict=False)
     if output.suffix.lower() != ".nfo":
         raise ValueError("output must end in .nfo")
-    if not any(output == root or root.resolve(strict=False) in output.parents for root in ROOTS):
-        raise ValueError("output must be inside the configured Films or Séries root")
+    if not any(output == root or root.resolve(strict=False) in output.parents for root in library_roots()):
+        raise ValueError("output must be inside the configured Movies or Series root")
     return output
 
 

@@ -7,10 +7,7 @@ import argparse
 import json
 import re
 import unicodedata
-from pathlib import Path
-
-FILMS_ROOT = Path("/Volumes/ssd/Films")
-SERIES_ROOT = Path("/Volumes/ssd/Se\u0301ries")
+from _common import library_roots
 
 
 def component(value: str) -> str:
@@ -35,7 +32,8 @@ def movie_plan(args) -> dict:
     title = component(args.title)
     director = component(args.director)
     res = resolution(args.resolution)
-    folder = FILMS_ROOT / director / f"{title} ({args.year})"
+    movies_root, _series_root = library_roots()
+    folder = movies_root / director / f"{title} ({args.year})"
     base = f"{title} ({args.year}) [{res}]"
     return {
         "kind": "movie",
@@ -54,7 +52,8 @@ def episode_plan(args) -> dict:
     title = component(args.title)
     episode_title = component(args.episode_title)
     res = resolution(args.resolution)
-    show = SERIES_ROOT / f"{title} ({args.year})"
+    _movies_root, series_root = library_roots()
+    show = series_root / f"{title} ({args.year})"
     season = show / f"Season {args.season:02d}"
     base = (
         f"{title} ({args.year}) - S{args.season:02d}E{args.episode:02d} - "

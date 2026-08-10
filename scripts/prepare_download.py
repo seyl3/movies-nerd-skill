@@ -12,11 +12,9 @@ import shutil
 import subprocess
 import sys
 
-from _common import GIB, format_gib, parse_size
+from _common import GIB, format_gib, library_roots, parse_size, staging_roots
 from qbittorrent_api import magnet_hash
 
-MOVIE_STAGE = Path("/Volumes/ssd/Films/.incoming/Movies Nerd")
-SERIES_STAGE = Path("/Volumes/ssd/Séries/.incoming/Movies Nerd")
 MAX_BYTES = 15 * GIB
 HEADROOM = 10 * GIB
 
@@ -44,13 +42,13 @@ def main() -> int:
         expected = parse_size(args.expected_size)
         if expected > MAX_BYTES and not args.allow_oversize:
             raise ValueError(f"expected payload {format_gib(expected)} exceeds the 15 GiB limit")
-        stage = MOVIE_STAGE if args.kind == "movie" else SERIES_STAGE
+        movies_root, series_root = library_roots()
+        movie_stage, series_stage = staging_roots()
+        stage = movie_stage if args.kind == "movie" else series_stage
         probe = stage
         while not probe.exists() and probe != probe.parent:
             probe = probe.parent
-        expected_root = MOVIE_STAGE.parents[1] if args.kind == "movie" else SERIES_STAGE.parents[1]
-        if probe != stage and expected_root.resolve(strict=False) not in (probe.resolve(strict=False), *probe.resolve(strict=False).parents):
-            raise ValueError(f"library volume is not mounted: {expected_root}")
+        expected_root = movies_root if args.kind == "movie" else series_root
         free = shutil.disk_usage(probe).free
         needed = expected + HEADROOM
         if free < needed:
@@ -64,6 +62,8 @@ def main() -> int:
             "expected_size_gib": round(expected / GIB, 2),
             "free_gib": round(free / GIB, 2),
             "staging": str(stage),
+            "library_root": str(expected_root),
+            "library_root_exists": expected_root.is_dir(),
             "next": "inspect client metadata, deselect extras, then confirm start",
         }
         if not args.execute:

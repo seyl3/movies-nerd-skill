@@ -3,5 +3,5 @@
 (deny network*)
 (deny file-write*)
 (allow file-write*
-  (subpath "/Volumes/ssd/Films/.incoming/Movies Nerd")
-  (subpath "/Volumes/ssd/Séries/.incoming/Movies Nerd"))
+  (subpath (param "MOVIE_STAGE"))
+  (subpath (param "SERIES_STAGE")))

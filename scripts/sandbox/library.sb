@@ -3,5 +3,5 @@
 (deny network*)
 (deny file-write*)
 (allow file-write*
-  (subpath "/Volumes/ssd/Films")
-  (subpath "/Volumes/ssd/Séries"))
+  (subpath (param "MOVIES_ROOT"))
+  (subpath (param "SERIES_ROOT")))

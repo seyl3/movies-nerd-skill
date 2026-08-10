@@ -9,10 +9,7 @@ import os
 import subprocess
 from pathlib import Path
 
-STAGING_ROOTS = (
-    Path("/Volumes/ssd/Films/.incoming/Movies Nerd"),
-    Path("/Volumes/ssd/Se\u0301ries/.incoming/Movies Nerd"),
-)
+from _common import staging_roots
 LANG_NAMES = {
     "eng": "English", "fre": "French", "ita": "Italian", "spa": "Spanish",
     "ger": "German", "jpn": "Japanese", "kor": "Korean", "ara": "Arabic",
@@ -29,7 +26,7 @@ LANG_NORMALIZE = {
 
 def in_staging(path: Path) -> bool:
     resolved = path.resolve(strict=False)
-    for root in STAGING_ROOTS:
+    for root in staging_roots():
         try:
             resolved.relative_to(root.resolve(strict=False))
             return True

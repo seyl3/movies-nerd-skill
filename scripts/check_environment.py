@@ -13,8 +13,7 @@ import subprocess
 import sys
 from urllib.parse import urlparse
 
-MOVIES_ROOT = Path("/Volumes/ssd/Films")
-SERIES_ROOT = Path("/Volumes/ssd/Séries")
+from _common import library_configuration, library_roots
 
 
 def command(name: str) -> dict:
@@ -66,12 +65,15 @@ def qbt_endpoint() -> dict:
 
 
 def main() -> int:
+    movies_root, series_root = library_roots()
     report = {
         "platform": platform.platform(),
         "python": {"version": platform.python_version(), "supported": sys.version_info >= (3, 11)},
         "commands": {name: command(name) for name in ("ffmpeg", "ffprobe", "git")},
         "qBittorrent": qbt_endpoint(),
-        "libraries": {"movies": root_status(MOVIES_ROOT), "series": root_status(SERIES_ROOT)},
+        "subtitles": {"opensubtitles_api_key_configured": bool(os.environ.get("OPENSUBTITLES_API_KEY", "").strip())},
+        "library_configuration": library_configuration(),
+        "libraries": {"movies": root_status(movies_root), "series": root_status(series_root)},
     }
     report["commands"]["sandbox-exec"] = sandbox_status()
     required_ok = (
