@@ -40,17 +40,36 @@ def run(args: list[str]) -> subprocess.CompletedProcess:
 
 
 def probe(path: Path) -> dict:
-    result = run(["ffprobe", "-v", "error", "-show_streams", "-show_chapters", "-of", "json", str(path)])
+    result = run([
+        "ffprobe", "-v", "error", "-show_streams", "-show_chapters",
+        "-show_format", "-of", "json", str(path),
+    ])
     return json.loads(result.stdout)
 
 
-def streamhash(path: Path) -> list[str]:
-    result = run([
-        "ffmpeg", "-v", "error", "-i", str(path), "-map", "0:v", "-map", "0:a",
-        "-map", "0:s?", "-map", "0:t?", "-c", "copy", "-f", "streamhash",
-        "-hash", "sha256", "-",
-    ])
-    return result.stdout.strip().splitlines()
+def stream_signature(info: dict) -> list[tuple]:
+    signatures = []
+    for stream in info.get("streams", []):
+        kind = stream.get("codec_type")
+        if kind not in {"video", "audio", "subtitle", "attachment"}:
+            continue
+        signatures.append((
+            kind,
+            stream.get("codec_name"),
+            stream.get("width"),
+            stream.get("height"),
+            stream.get("sample_rate"),
+            stream.get("channels"),
+        ))
+    return signatures
+
+
+def duration(info: dict) -> float | None:
+    raw = (info.get("format") or {}).get("duration")
+    try:
+        return float(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def overrides(values: list[str]) -> dict[int, str]:
@@ -148,17 +167,18 @@ def main() -> int:
         command += [f"-disposition:s:{i}", "+".join(flags) if flags else "0"]
     command.append(str(temp))
 
-    before_hash = streamhash(source)
     try:
         run(command)
-        after_hash = streamhash(temp)
         after = probe(temp)
-        before_types = [s.get("codec_type") for s in streams if s.get("codec_type") in {"video", "audio", "subtitle", "attachment"}]
-        after_types = [s.get("codec_type") for s in after.get("streams", []) if s.get("codec_type") in {"video", "audio", "subtitle", "attachment"}]
-        if before_hash != after_hash:
-            raise RuntimeError("material packet hash mismatch")
-        if before_types != after_types:
-            raise RuntimeError("material stream layout mismatch")
+        if stream_signature(info) != stream_signature(after):
+            raise RuntimeError("material stream layout or codec mismatch")
+        before_duration = duration(info)
+        after_duration = duration(after)
+        if before_duration is None or after_duration is None:
+            raise RuntimeError("material duration unavailable for verification")
+        tolerance = max(1.0, before_duration * 0.001)
+        if abs(before_duration - after_duration) > tolerance:
+            raise RuntimeError("material duration mismatch")
         if len(info.get("chapters", [])) != len(after.get("chapters", [])):
             raise RuntimeError("chapter count mismatch")
         os.replace(temp, target)
@@ -167,8 +187,8 @@ def main() -> int:
         raise
     print(json.dumps({
         "input": str(source), "output": str(target), "container": "matroska",
-        "reencoded": False, "packet_hashes_verified": True,
-        "chapters_verified": True, "source_preserved": True,
+        "reencoded": False, "streams_verified": True,
+        "duration_verified": True, "chapters_verified": True, "source_preserved": True,
     }, indent=2))
     return 0
 

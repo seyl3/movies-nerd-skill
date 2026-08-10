@@ -93,9 +93,8 @@ Root: `<SERIES_ROOT>`
 - Verify title, year, movie versus episode identity, season/episode numbers, release source, runtime, and timing coverage. A forced or partial track does not satisfy full-language coverage.
 - Do not hard-code subtitle-provider API keys in the skill. Read credentials from `OPENSUBTITLES_API_KEY` or an approved secret store only when needed, and never echo or commit them.
 
-## Integrity and cleanliness
+## Validation and cleanliness
 
 - Recoverably quarantine `.DS_Store`, AppleDouble `._*`, release URLs, advertisements, unrelated installer shortcuts, and Portuguese sidecar subtitles after verifying the payload. Do not remove Portuguese audio tracks.
 - Preserve featurettes under `Featurettes/` and exclude them from main-feature naming rules.
-- Refresh `SHA256SUMS.txt` at the affected library root, excluding the manifest itself, staging, quarantine, and macOS sidecars.
-- Validate all NFO files as XML, all images as decodable images, and dispersed checksum entries before reporting completion.
+- Validate all NFO files as XML and all images as decodable images before reporting completion.

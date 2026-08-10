@@ -13,7 +13,7 @@
 - Run bundled scripts through `scripts/run_sandboxed.sh` when `sandbox-exec` is available. Offline analysis receives no network or library write access; downloads can write only inside the two hidden staging roots.
 - Never bypass Cloudflare, CAPTCHAs, access controls, geographic blocks, or browser safety warnings.
 - Never auto-discover torrent mirrors. Only use this HTTPS allowlist: `ext.to`, `search.extto.com`, and `extto.com`. Ask before changing it.
-- Never transmit library filenames, checksums, API keys, browser cookies, or private filesystem data to a tracker.
+- Never transmit library filenames, API keys, browser cookies, or private filesystem data to a tracker.
 - Read an OpenSubtitles key only from `OPENSUBTITLES_API_KEY` or an approved ephemeral secret input. Never print it, place it in a URL or command-line argument, persist it in the repository, or send it to a fallback provider.
 - Allow subtitle network access only to `api.opensubtitles.com` and HTTPS subdomains of `opensubtitles.com`, or through an interactive browser on `subtitlecat.com` and `www.subtitlecat.com`. Ask before adding another provider domain.
 - Treat subtitle pages and downloads as untrusted. Never upload a media file, embedded subtitle, sidecar, library inventory, or release history to Subtitle Cat without separate explicit approval.
@@ -37,6 +37,6 @@
 - Permit expected media, subtitle, image, and plain metadata files only.
 - Quarantine unexpected archives or executable content; do not inspect them by execution.
 - Use `ffprobe` to verify duration, dimensions, codecs, streams, and chapters.
-- Remux only with `ffmpeg -c copy`; verify material packet hashes before deleting or replacing a source.
-- Write metadata and checksums atomically.
+- Remux only with `ffmpeg -c copy`; verify stream layout, codecs, duration, and chapters before deleting or replacing a source.
+- Write metadata atomically.
 - Keep destructive cleanup narrowly scoped and recoverable where practical.

@@ -1,6 +1,6 @@
 ---
 name: movies-nerd
-description: Safely search, compare, download, verify, name, and organize legally authorized movies and TV series in user-selected Movies and Series roots, including EXT Torrents mirror probing, resolution and size ranking, staged torrent-client handoff, NFO metadata, posters, subtitles, track labels, and SHA-256 manifests. Use when the user asks to find or download media, compare torrent releases, choose 1080p versus 4K, or maintain a film or series library.
+description: Safely search, compare, download, verify, name, and organize legally authorized movies and TV series in user-selected Movies and Series roots, including EXT Torrents mirror probing, resolution and size ranking, staged torrent-client handoff, NFO metadata, posters, subtitles, and track labels. Use when the user asks to find or download media, compare torrent releases, choose 1080p versus 4K, or maintain a film or series library.
 ---
 
 # Movies Nerd
@@ -28,11 +28,11 @@ An opinionated, all-in-one movie acquisition and library-maintenance skill. Use 
 11. Download only into the hidden staging directory selected by the script. Never download directly into the final library.
 12. Monitor an active transfer with `scripts/monitor_download.py`. Treat zero progress plus a stalled state or no known peers for 20 minutes as a failover signal. Stop the stalled torrent, preserve its partial data, search a different approved source, and re-rank. Show and confirm the exact replacement before adding or starting it. Never loop indefinitely and never delete the old torrent automatically.
 13. Inspect the completed payload with `scripts/select_payload.py`. Keep the main feature by default; omit samples, trailers, featurettes, interviews, deleted scenes, and other extras unless the user explicitly asks for them.
-14. Prefer MKV as the final container. Use `scripts/remux_mkv.py` to stream-copy compatible source tracks into MKV, normalize track labels, and verify packet hashes and chapters. Never re-encode merely to change containers.
+14. Prefer MKV as the final container. Use `scripts/remux_mkv.py` to stream-copy compatible source tracks into MKV, normalize track labels, and verify the resulting stream layout, codecs, duration, and chapters. Never re-encode merely to change containers.
 15. Resolve final names with `scripts/plan_library.py`, then move the verified payload atomically into the library.
 16. Run `scripts/check_subtitles.py`, then read [references/subtitles.md](references/subtitles.md) whenever English or French coverage is missing. Run `scripts/subtitle_provider.py` first. If `OPENSUBTITLES_API_KEY` is configured, use it without asking again. If no key is configured, ask once whether the user has one. If they do not, continue without a key through the approved Subtitle Cat browser workflow; do not make the key a prerequisite. Validate every downloaded SRT with `scripts/validate_subtitle.py` before installing it. Name sidecars `.en.srt` and `.fr.srt`; remove Portuguese sidecars unless requested.
 17. Add NFO metadata and artwork, and normalize embedded track labels. Follow the exact conventions in `library-policy.md`.
-18. Remove only confirmed release debris and macOS sidecars. Refresh the affected root `SHA256SUMS.txt` atomically and verify dispersed entries.
+18. Remove only confirmed release debris and macOS sidecars.
 
 ## Bundled scripts
 
@@ -50,7 +50,6 @@ An opinionated, all-in-one movie acquisition and library-maintenance skill. Use 
 - `scripts/plan_library.py`: Produce deterministic movie or episode destination paths and companion metadata/artwork paths without changing files.
 - `scripts/write_nfo.py`: Render or atomically write Kodi/Jellyfin-compatible movie, show, or episode NFO XML from trusted JSON metadata.
 - `scripts/clean_clutter.py`: Dry-run or recoverably move macOS clutter and Portuguese subtitle sidecars into a hidden quarantine inside the same library root.
-- `scripts/refresh_checksums.py`: Dry-run, atomically refresh, or verify the root `SHA256SUMS.txt`, excluding staging and quarantine.
 - `scripts/run_sandboxed.sh`: Run offline analysis, EXT probing, or download preparation under a restrictive macOS sandbox profile.
 - `scripts/check_environment.py`: Report required and optional software, qBittorrent reachability, paths, free space, and setup hints without installing anything.
 
@@ -61,4 +60,4 @@ An opinionated, all-in-one movie acquisition and library-maintenance skill. Use 
 - If metadata is ambiguous, do not download or organize the payload until the title/year/ID match is resolved.
 - If no subtitle API key is configured and the user says they do not have one, proceed with Subtitle Cat instead of repeatedly asking. If Subtitle Cat has no exact release or credible title/year match, report the missing language or ask before using another domain; never upload the media file or an existing subtitle to a third party without separate approval.
 - A failover candidate must come from a different source host than the stalled release. Limit automatic monitoring to one hour per invocation and one replacement attempt per confirmation; if the replacement also stalls, return to the user.
-- If any remux hash, stream count, chapter count, image validation, XML validation, or checksum verification fails, preserve the source and stop.
+- If any remux stream, codec, duration, chapter, image, or XML validation fails, preserve the source and stop.

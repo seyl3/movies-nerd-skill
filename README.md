@@ -1,6 +1,6 @@
 # Movies Nerd
 
-Movies Nerd is an opinionated, all-in-one movie acquisition and library-maintenance skill for Codex. It searches and ranks user-authorized releases, optimizes comparable encodes by runtime-normalized size, hands approved magnets to a local qBittorrent instance in a stopped state, verifies size and payload contents, skips extras by default, prefers an efficient 4K release under 15 GiB or a strong space-efficient 1080p fallback, monitors stalled transfers and proposes a different-source replacement, remuxes compatible media to MKV without re-encoding, and organizes movies and series with artwork, NFO metadata, English and French subtitles, clean track labels, and SHA-256 manifests.
+Movies Nerd is an opinionated, all-in-one movie acquisition and library-maintenance skill for Codex. It searches and ranks user-authorized releases, optimizes comparable encodes by runtime-normalized size, hands approved magnets to a local qBittorrent instance in a stopped state, verifies size and payload contents, skips extras by default, prefers an efficient 4K release under 15 GiB or a strong space-efficient 1080p fallback, monitors stalled transfers and proposes a different-source replacement, remuxes compatible media to MKV without re-encoding, and organizes movies and series with artwork, NFO metadata, English and French subtitles, and clean track labels.
 
 It is designed around a user-selected pair of library roots:
 

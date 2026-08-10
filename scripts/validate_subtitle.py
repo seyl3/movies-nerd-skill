@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 from pathlib import Path
 import re
@@ -79,7 +78,6 @@ def validate_bytes(data: bytes, expected_language: str, media_duration: float | 
         "expected_language": expected_language,
         "encoding": encoding,
         "bytes": len(data),
-        "sha256": hashlib.sha256(data).hexdigest(),
         "cue_count": len(cues),
         "first_cue_seconds": round(first_ms / 1000, 3) if first_ms is not None else None,
         "last_cue_seconds": round(last_ms / 1000, 3) if last_ms is not None else None,

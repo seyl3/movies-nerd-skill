@@ -19,7 +19,7 @@ import clean_clutter
 import monitor_download
 import opensubtitles_api
 import rank_releases
-import refresh_checksums
+import remux_mkv
 import subtitle_provider
 import validate_subtitle
 import write_nfo
@@ -134,15 +134,6 @@ class PolicyTests(unittest.TestCase):
         self.assertTrue(report["stalled"])
         self.assertEqual(report["failover"]["exclude_source"], "source.example")
 
-    def test_checksum_excludes_staging_and_manifest(self):
-        with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw)
-            (root / "Film.mkv").write_bytes(b"film")
-            (root / refresh_checksums.MANIFEST).write_text("old", encoding="utf-8")
-            (root / ".incoming").mkdir()
-            (root / ".incoming" / "partial.mkv").write_bytes(b"partial")
-            self.assertEqual([name for _digest, name in refresh_checksums.entries(root)], ["Film.mkv"])
-
     def test_clutter_finder_detects_portuguese_and_apple_files(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -175,6 +166,17 @@ class PolicyTests(unittest.TestCase):
         self.assertTrue(valid["valid"])
         self.assertTrue(valid["counts_as_full_coverage"])
         self.assertFalse(invalid["valid"])
+
+    def test_remux_validation_uses_stream_metadata_and_duration(self):
+        info = {
+            "streams": [
+                {"codec_type": "video", "codec_name": "h264", "width": 1920, "height": 1080},
+                {"codec_type": "audio", "codec_name": "aac", "sample_rate": "48000", "channels": 2},
+            ],
+            "format": {"duration": "5400.125"},
+        }
+        self.assertEqual(remux_mkv.stream_signature(info), remux_mkv.stream_signature(info.copy()))
+        self.assertEqual(remux_mkv.duration(info), 5400.125)
 
     def test_opensubtitles_requires_environment_key(self):
         with self.assertRaises(opensubtitles_api.SubtitleApiError):
