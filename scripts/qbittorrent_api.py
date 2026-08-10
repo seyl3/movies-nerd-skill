@@ -13,23 +13,17 @@ from pathlib import Path, PurePosixPath
 import re
 import sys
 import time
+import unicodedata
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import HTTPCookieProcessor, Request, build_opener
 import uuid
 
 from _common import GIB, format_gib, staging_roots
+from payload_safety import BIDI_RE, MAX_PAYLOAD_FILES, VIDEO_EXTENSIONS, filename_reasons
 
 MAX_BYTES = 15 * GIB
 LOOPBACKS = {"127.0.0.1", "::1", "localhost"}
-VIDEO_EXTENSIONS = {".mkv", ".mp4", ".m4v", ".mov", ".avi", ".webm", ".ts", ".m2ts"}
-SAFE_EXTENSIONS = VIDEO_EXTENSIONS | {
-    ".srt", ".ass", ".ssa", ".vtt", ".sub", ".idx", ".jpg", ".jpeg", ".png", ".webp", ".nfo", ".txt",
-}
-DANGEROUS_EXTENSIONS = {
-    ".app", ".bat", ".cmd", ".com", ".dll", ".dmg", ".exe", ".hta", ".iso", ".jar", ".js", ".lnk", ".msi",
-    ".pkg", ".ps1", ".py", ".scr", ".sh", ".vbs", ".zip", ".rar", ".7z",
-}
 EXTRA_RE = re.compile(r"(?:^|[\\/._ -])(sample|trailer|featurette|interview|deleted[ ._-]?scene|behind[ ._-]?the[ ._-]?scenes|bonus)(?:$|[\\/._ -])", re.I)
 CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
@@ -153,26 +147,66 @@ def safe_stage(kind: str) -> Path:
 
 
 def classify_files(files: list[dict], series: bool = False) -> dict:
+    if len(files) > MAX_PAYLOAD_FILES:
+        return {
+            "files": [],
+            "unsafe": [{
+                "index": -1,
+                "name": "<torrent payload>",
+                "size": 0,
+                "priority": 0,
+                "extra": False,
+                "unsafe_reasons": [f"payload contains more than {MAX_PAYLOAD_FILES} files"],
+            }],
+            "main_feature": None,
+            "episodes": [],
+            "keep_indices": [],
+            "skip_indices": [],
+            "selected_size": 0,
+        }
     normalized = []
     unsafe = []
     videos = []
+    seen_indices: set[int] = set()
+    seen_paths: set[str] = set()
     for index, item in enumerate(files):
+        reasons = []
+        if not isinstance(item, dict):
+            item = {}
+            reasons.append("invalid torrent metadata record")
         name = str(item.get("name", ""))
         posix = PurePosixPath(name.replace("\\", "/"))
         suffix = posix.suffix.lower()
-        reasons = []
-        if not name or CONTROL_RE.search(name) or posix.is_absolute() or ".." in posix.parts:
-            reasons.append("unsafe path")
-        if suffix in DANGEROUS_EXTENSIONS:
-            reasons.append("dangerous or archive extension")
-        elif suffix not in SAFE_EXTENSIONS:
-            reasons.append("unexpected extension")
+        reasons.extend(filename_reasons(name))
+        portable_path = unicodedata.normalize("NFC", str(posix)).casefold()
+        if portable_path in seen_paths:
+            reasons.append("duplicate or platform-colliding payload path")
+        seen_paths.add(portable_path)
+        try:
+            file_index = int(item.get("index", index))
+        except (TypeError, ValueError):
+            file_index = index
+            reasons.append("invalid payload file index")
+        if file_index < 0 or file_index in seen_indices:
+            reasons.append("negative or duplicate payload file index")
+        seen_indices.add(file_index)
+        try:
+            size = int(item.get("size", 0))
+        except (TypeError, ValueError):
+            size = -1
+        if size <= 0:
+            reasons.append("invalid or empty payload file size")
+        try:
+            priority = int(item.get("priority", 0))
+        except (TypeError, ValueError):
+            priority = 0
+            reasons.append("invalid payload priority")
         extra = bool(EXTRA_RE.search(name))
         record = {
-            "index": int(item.get("index", index)),
+            "index": file_index,
             "name": name,
-            "size": int(item.get("size", 0)),
-            "priority": int(item.get("priority", 0)),
+            "size": size,
+            "priority": priority,
             "extra": extra,
             "unsafe_reasons": reasons,
         }
@@ -208,6 +242,8 @@ def torrent_info(client: QbtClient, torrent_hash: str) -> dict:
     result = client.json(f"torrents/info?hashes={torrent_hash}")
     if not isinstance(result, list) or not result:
         raise QbtError("torrent is not present in qBittorrent")
+    if not isinstance(result[0], dict):
+        raise QbtError("qBittorrent returned invalid torrent metadata")
     return result[0]
 
 
@@ -221,8 +257,6 @@ def torrent_files(client: QbtClient, torrent_hash: str) -> list[dict]:
 def validate_torrent(client: QbtClient, torrent_hash: str, allow_oversize: bool = False, series: bool = False) -> tuple[dict, dict]:
     info = torrent_info(client, torrent_hash)
     files = classify_files(torrent_files(client, torrent_hash), series=series)
-    if not files["files"]:
-        raise QbtError("torrent metadata is not available yet; leave it stopped briefly and inspect again")
     stage_roots = tuple(root.resolve(strict=False) for root in staging_roots())
     raw_save = Path(str(info.get("save_path", ""))).resolve(strict=False)
     if not any(raw_save == root or root in raw_save.parents for root in stage_roots):
@@ -230,6 +264,8 @@ def validate_torrent(client: QbtClient, torrent_hash: str, allow_oversize: bool 
     if files["unsafe"]:
         names = ", ".join(item["name"] for item in files["unsafe"][:5])
         raise QbtError(f"torrent contains unsafe or unexpected payload files: {names}")
+    if not files["files"]:
+        raise QbtError("torrent metadata is not available yet; leave it stopped briefly and inspect again")
     if not files["main_feature"]:
         raise QbtError("no main video feature or episode was identified")
     if files["selected_size"] > MAX_BYTES and not allow_oversize:
@@ -248,7 +284,13 @@ def command_add(client: QbtClient, args: argparse.Namespace) -> dict:
     if not args.commit:
         raise QbtError("refusing to add torrent without --commit")
     stage = safe_stage(args.kind)
-    stage.mkdir(parents=True, exist_ok=True)
+    if stage.is_symlink():
+        raise QbtError("staging root must not be a symlink")
+    stage.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        stage.chmod(0o700)
+    except OSError as exc:
+        raise QbtError(f"cannot restrict staging permissions: {exc}") from exc
     fields = {
         "urls": args.magnet,
         "savepath": str(stage),
@@ -258,7 +300,7 @@ def command_add(client: QbtClient, args: argparse.Namespace) -> dict:
         "autoTMM": "false",
     }
     if args.rename:
-        if CONTROL_RE.search(args.rename) or "/" in args.rename or "\\" in args.rename or args.rename in {".", ".."}:
+        if CONTROL_RE.search(args.rename) or BIDI_RE.search(args.rename) or "/" in args.rename or "\\" in args.rename or args.rename in {".", ".."}:
             raise QbtError("rename must be a single safe path component")
         fields["rename"] = args.rename
     response = client.request("torrents/add", fields, multipart_body=True).decode("utf-8", "replace").strip()

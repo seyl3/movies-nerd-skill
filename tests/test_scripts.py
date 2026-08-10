@@ -18,8 +18,10 @@ import qbittorrent_api as qbt
 import clean_clutter
 import monitor_download
 import opensubtitles_api
+import payload_safety
 import rank_releases
 import remux_mkv
+import select_payload
 import subtitle_provider
 import validate_subtitle
 import write_nfo
@@ -52,6 +54,39 @@ class QbittorrentSafetyTests(unittest.TestCase):
         self.assertEqual(result["main_feature"]["index"], 0)
         self.assertIn(1, result["skip_indices"])
         self.assertEqual(result["unsafe"][0]["index"], 3)
+
+    def test_metadata_gate_rejects_double_extensions_and_bidi_spoofing(self):
+        files = [
+            {"index": 0, "name": "Movie/Movie.mkv", "size": 1_000_000_000},
+            {"index": 1, "name": "Movie/setup.exe.mkv", "size": 1_000_000},
+            {"index": 2, "name": "Movie/\u202espoof.mkv", "size": 1_000_000},
+        ]
+        result = qbt.classify_files(files)
+        self.assertEqual([item["index"] for item in result["unsafe"]], [1, 2])
+        self.assertIn("inner extension", result["unsafe"][0]["unsafe_reasons"][0])
+        self.assertTrue(any("spoofing" in reason for reason in result["unsafe"][1]["unsafe_reasons"]))
+
+    def test_metadata_gate_rejects_malformed_and_colliding_records(self):
+        files = [
+            {"index": 0, "name": "Movie/Film.mkv", "size": 1_000_000_000},
+            {"index": 1, "name": "movie/FILM.MKV", "size": 2_000_000},
+            {"index": "broken", "name": "Movie/Subs.en.srt", "size": 50_000, "priority": "bad"},
+            "not-a-record",
+        ]
+        result = qbt.classify_files(files)
+        self.assertEqual(len(result["unsafe"]), 3)
+        self.assertTrue(any(
+            "platform-colliding" in reason
+            for reason in result["unsafe"][0]["unsafe_reasons"]
+        ))
+        self.assertTrue(any(
+            "invalid payload file index" in reason
+            for reason in result["unsafe"][1]["unsafe_reasons"]
+        ))
+        self.assertTrue(any(
+            "invalid torrent metadata record" in reason
+            for reason in result["unsafe"][2]["unsafe_reasons"]
+        ))
 
     def test_series_keeps_all_episodes(self):
         files = [
@@ -155,6 +190,21 @@ class PolicyTests(unittest.TestCase):
         result = subtitle_provider.plan("Example", 2024, None, ["en"], False, {"OPENSUBTITLES_API_KEY": secret})
         self.assertEqual(result["action"], "use-opensubtitles-api")
         self.assertNotIn(secret, json.dumps(result))
+
+    def test_content_gate_rejects_renamed_executable_and_archive(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            disguised_video = root / "Movie.mkv"
+            disguised_video.write_bytes(b"MZ" + b"x" * 128)
+            disguised_image = root / "poster.png"
+            disguised_image.write_bytes(b"PK\x03\x04" + b"x" * 128)
+            video_reasons = payload_safety.content_reasons(disguised_video, ".mkv")
+            image_reasons = payload_safety.content_reasons(disguised_image, ".png")
+            report = select_payload.scan_payload(root)
+            self.assertTrue(any("Windows executable" in reason for reason in video_reasons))
+            self.assertTrue(any("ZIP" in reason for reason in image_reasons))
+            self.assertFalse(report["safe_to_continue"])
+            self.assertEqual(len(report["hazards"]), 2)
 
     def test_valid_srt_and_html_rejection(self):
         cues = "\n\n".join(

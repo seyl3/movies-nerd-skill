@@ -16,7 +16,7 @@ OpenSubtitles is used when `OPENSUBTITLES_API_KEY` is configured. Without a key,
 
 The skill is a clean-room implementation. It does not run the third-party torrent-search project that inspired the idea. Its scripts use the Python standard library and existing command-line tools only. Required software is Python 3.11+, qBittorrent 5.x, and FFmpeg/ffprobe. Node.js, npm, Docker, cloned scraper servers, and automatic installers are intentionally absent.
 
-Downloads require a separate confirmation, begin in a hidden staging directory, and use qBittorrent's loopback-only Web API. The API client can add, inspect, start, and stop a torrent, but cannot delete one. Magnet data and downloaded filenames are treated as untrusted. `sandbox-exec` is used as optional defense in depth on macOS.
+Downloads require separate selection and start confirmations, begin in a user-private hidden staging directory, and use qBittorrent's loopback-only Web API. A simple two-gate model rejects unsafe metadata before content transfer, then checks real file signatures and media structure once after transfer. Renamed executables, scripts, archives, disk images, spoofed paths, symlinks, invalid companions, and non-media files fail closed. The API client can add, inspect, start, and stop a torrent, but cannot delete one. `sandbox-exec` is used as optional defense in depth on macOS; media hashes and checksum manifests are intentionally absent.
 
 ## Setup
 
