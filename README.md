@@ -10,6 +10,8 @@ It is designed around a user-selected pair of library roots:
 
 Movies Nerd asks for both roots before library work. If the user does not specify them, the defaults are `~/Documents/Movies` and `~/Documents/Series`; no shared drive or volume layout is assumed.
 
+Movies Nerd is written for film fans and collectors, not technical operators. It keeps routine client, security, remuxing, metadata, and subtitle work in the background and asks only for decisions the user actually needs to make.
+
 OpenSubtitles is used when `OPENSUBTITLES_API_KEY` is configured. Without a key, Movies Nerd asks once and then falls back to an exact-match Subtitle Cat browser download, followed by local SRT and timing validation.
 
 ## Safety and dependencies
