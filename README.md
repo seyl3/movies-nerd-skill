@@ -1,40 +1,39 @@
 # Movies Nerd
 
-Movies Nerd is an opinionated, all-in-one movie acquisition and library-maintenance skill for Codex. It searches and ranks user-authorized releases, optimizes comparable encodes by runtime-normalized size, hands approved magnets to a local qBittorrent instance in a stopped state, verifies size and payload contents, skips extras by default, prefers an efficient 4K release under 15 GiB or a strong space-efficient 1080p fallback, monitors stalled transfers and proposes a different-source replacement, remuxes compatible media to MKV without re-encoding, organizes movies and series with artwork, NFO metadata, English and French subtitles, and clean track labels, then suggests a similar film and another worthwhile film by the same director with verified Letterboxd and SensCritique links.
+Movies Nerd is an opinionated, all-in-one Codex skill for film fans. A specific-title request is treated as authorization; it shows quality, size, peers, and source, then asks once before downloading.
 
-It is designed around a user-selected pair of library roots:
+## Features
+
+- Picks an efficient 4K release up to 15 GiB, or a space-efficient 1080p fallback.
+- Uses local qBittorrent, monitors stalls, proposes a different source, skips extras, and prefers MKV without re-encoding.
+- Creates clean movie/series folders with posters, NFO metadata, track labels, and English/French subtitles. It uses OpenSubtitles with `OPENSUBTITLES_API_KEY`, or Subtitle Cat without one.
+- Suggests a similar film and another by the director, with verified Letterboxd and SensCritique links.
+
+## Layout
 
 - Movies: `<MOVIES_ROOT>/<Director>/<Title> (<Year>)/`
 - Series: `<SERIES_ROOT>/<Series> (<Year>)/Season NN/`
-- Final video names include only the title/year or episode identity plus `[2160p]`, `[1080p]`, or another resolution tag.
+- Videos: title/year or episode name plus a resolution tag such as `[1080p]`.
 
-Movies Nerd asks for both roots before library work. If the user does not specify them, the defaults are `~/Documents/Movies` and `~/Documents/Series`; no shared drive or volume layout is assumed.
-
-Movies Nerd is written for film fans and collectors, not technical operators. It keeps routine client, security, remuxing, metadata, and subtitle work in the background and asks only for decisions the user actually needs to make.
-
-OpenSubtitles is used when `OPENSUBTITLES_API_KEY` is configured. Without a key, Movies Nerd asks once and then falls back to an exact-match Subtitle Cat browser download, followed by local SRT and timing validation.
-
-## Safety and dependencies
-
-The skill is a clean-room implementation. It does not run the third-party torrent-search project that inspired the idea. Its scripts use the Python standard library and existing command-line tools only. Required software is Python 3.11+, qBittorrent 5.x, and FFmpeg/ffprobe. Node.js, npm, Docker, cloned scraper servers, and automatic installers are intentionally absent.
-
-A direct request for a specific title is treated as the user's authorization, without repetitive rights questions. Downloads require one compact release summary and one clear confirmation, begin in a user-private hidden staging directory, and use qBittorrent's loopback-only Web API. A simple two-gate model rejects unsafe metadata before content transfer, then checks real file signatures and media structure once after transfer. Renamed executables, scripts, archives, disk images, spoofed paths, symlinks, invalid companions, and non-media files fail closed. The API client can add, inspect, start, and stop a torrent, but cannot delete one. `sandbox-exec` is used as optional defense in depth on macOS; media hashes and checksum manifests are intentionally absent.
+Roots are selected separately. Defaults are `~/Documents/Movies` and `~/Documents/Series`; no shared drive layout is assumed.
 
 ## Setup
 
-Read [`references/setup.md`](references/setup.md), select the library roots, enable qBittorrent's Web UI on `127.0.0.1`, and provide credentials through `QBITTORRENT_USERNAME` and `QBITTORRENT_PASSWORD`. Then run:
+Requires Python 3.11+, qBittorrent 5.x, and FFmpeg/ffprobe. Scripts use Python's standard library—no Node.js, npm, Docker, scraper server, or automatic installer.
+
+Follow [setup](references/setup.md), enable qBittorrent's Web UI on `127.0.0.1`, set `QBITTORRENT_USERNAME` and `QBITTORRENT_PASSWORD`, then run:
 
 ```sh
 python3 scripts/check_environment.py
 python3 scripts/qbittorrent_api.py status
 ```
 
-The scripts never install dependencies or change qBittorrent settings automatically.
+## Safety
 
-## Usage
+This clean-room project runs no third-party scraper code. Downloads use private staging, loopback-only qBittorrent, and two checks that reject dangerous files, archives, spoofed paths, symlinks, and invalid media. The client cannot delete torrents. Optional macOS sandboxing adds isolation; media hashes and checksum manifests are omitted. See [security policy](references/security-policy.md).
 
-Install the `movies-nerd` folder as a Codex skill, then ask Codex to use `$movies-nerd`. The authoritative workflow is in [`SKILL.md`](SKILL.md); library conventions and security controls are in [`references/`](references/).
+## Use
 
-## License
+Install the `movies-nerd` folder and ask Codex to use `$movies-nerd`. The full workflow is in [SKILL.md](SKILL.md), with details under [references](references/).
 
-MIT — see [`LICENSE`](LICENSE).
+MIT licensed — see [LICENSE](LICENSE).
