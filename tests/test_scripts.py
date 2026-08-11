@@ -619,6 +619,7 @@ class PolicyTests(unittest.TestCase):
             self.assertEqual(len(moved), 2)
             self.assertTrue(quarantine.is_dir())
             self.assertTrue((quarantine / "transfers" / ("a" * 40) / "junk.nfo").is_file())
+            self.assertTrue(Path(moved[0]["from"]).name.startswith("._"))
 
     def test_finished_job_verification_ignores_macos_sidecars(self):
         with tempfile.TemporaryDirectory() as raw:

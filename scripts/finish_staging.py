@@ -88,6 +88,7 @@ def quarantine_targets(targets: list[Path], stage: Path, library: Path) -> tuple
         if destination.exists() or destination.is_symlink():
             raise ValueError("staging quarantine collision")
         moves.append((source, destination))
+    moves.sort(key=lambda pair: (0 if pair[0].name.startswith("._") else 1, str(pair[0])))
     completed: list[tuple[Path, Path]] = []
     try:
         for source, destination in moves:
@@ -95,7 +96,7 @@ def quarantine_targets(targets: list[Path], stage: Path, library: Path) -> tuple
             os.replace(source, destination)
             completed.append((source, destination))
     except OSError:
-        for source, destination in reversed(completed):
+        for source, destination in completed:
             if destination.exists() and not source.exists():
                 source.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
                 os.replace(destination, source)
