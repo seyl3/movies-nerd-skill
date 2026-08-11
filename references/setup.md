@@ -11,6 +11,8 @@ Movies Nerd intentionally has a small dependency surface. It does not install so
 
 Optional on macOS: `/usr/bin/sandbox-exec`. The launcher uses it as defense in depth when present. It is deprecated by Apple and is not a complete security boundary.
 
+Optional: MKVToolNix provides `mkvpropedit`, which can normalize track headers in seconds without a complete remux. Movies Nerd uses it only when available and when the staging filesystem supports a copy-on-write rollback clone; FFmpeg remains the dependency-free fallback path.
+
 No Node.js, npm packages, Docker image, browser extension, cloned scraper server, or Python package is required.
 
 ## Configure fast search
@@ -44,11 +46,23 @@ brew install ffmpeg python git
 
 The existing desktop qBittorrent application is sufficient; `qbittorrent-nox` is not required on macOS.
 
+For the optional fast MKV header path:
+
+```sh
+brew install mkvtoolnix
+```
+
 ### Debian or Ubuntu
 
 ```sh
 sudo apt update
 sudo apt install python3 ffmpeg qbittorrent-nox git
+```
+
+For the optional fast MKV header path:
+
+```sh
+sudo apt install mkvtoolnix
 ```
 
 ### Windows

@@ -21,7 +21,7 @@ Roots are selected separately. Defaults are `~/Documents/Movies` and `~/Document
 
 ## Setup
 
-Requires Python 3.11+, qBittorrent 5.x, and FFmpeg/ffprobe. Scripts use Python's standard library—no Node.js, npm, Docker, scraper server, or automatic installer.
+Requires Python 3.11+, qBittorrent 5.x, and FFmpeg/ffprobe. Optional MKVToolNix enables fast header-only edits. Scripts use Python's standard library—no Node.js, npm, Docker, scraper server, or automatic installer.
 
 Follow [setup](references/setup.md), enable qBittorrent's Web UI on `127.0.0.1`, set `QBITTORRENT_USERNAME` and `QBITTORRENT_PASSWORD`, then run:
 

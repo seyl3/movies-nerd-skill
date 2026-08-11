@@ -56,6 +56,7 @@ Gate 2 must:
 - Require 10 GiB of working headroom in addition to the selected payload.
 - Compare qBittorrent's metadata size and file list with the chosen result; stop on a material mismatch.
 - Permit expected media, subtitle, image, and plain metadata files only.
+- Modify MKV headers only inside staging, only after a copy-on-write rollback clone succeeds, and verify the result against the saved probe. Otherwise leave the source unchanged and use the remux path.
 - Remux only inside staging with `ffmpeg -c copy`. Verify stream layout, codecs, duration, and chapters; preserve the source on any mismatch.
 - Write metadata atomically and move only verified output into the final library.
 - Keep cleanup narrow and recoverable. The bundled qBittorrent client must not expose a delete operation.

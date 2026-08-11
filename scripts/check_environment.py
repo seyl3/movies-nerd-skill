@@ -69,7 +69,7 @@ def main() -> int:
     report = {
         "platform": platform.platform(),
         "python": {"version": platform.python_version(), "supported": sys.version_info >= (3, 11)},
-        "commands": {name: command(name) for name in ("ffmpeg", "ffprobe", "git")},
+        "commands": {name: command(name) for name in ("ffmpeg", "ffprobe", "git", "mkvpropedit")},
         "qBittorrent": qbt_endpoint(),
         "subtitles": {"opensubtitles_api_key_configured": bool(os.environ.get("OPENSUBTITLES_API_KEY", "").strip())},
         "library_configuration": library_configuration(),
