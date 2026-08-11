@@ -9,7 +9,7 @@ import sys
 import time
 
 from job_manifest import ManifestError, load_job
-from qbittorrent_api import QbtError, client_from_env, normalize_hash
+from qbittorrent_api import QbtError, connected_client, normalize_hash
 
 
 def sync_torrent(
@@ -135,7 +135,7 @@ def main() -> int:
         if args.stop_on_stall and not args.commit:
             raise QbtError("--stop-on-stall changes qBittorrent state and requires --commit")
         torrent_hash = normalize_hash(args.hash)
-        client = client_from_env()
+        client = connected_client()
         deadline = time.monotonic() + args.watch_minutes * 60
         rid = 0
         current = None

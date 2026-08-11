@@ -16,6 +16,7 @@ sys.path.insert(0, str(SCRIPTS))
 import _common
 import qbittorrent_api as qbt
 import clean_clutter
+import check_environment
 import check_subtitles
 import edit_mkv_headers
 import job_manifest
@@ -102,6 +103,54 @@ class QbittorrentSafetyTests(unittest.TestCase):
         result = qbt.classify_files(files, series=True)
         self.assertEqual(result["keep_indices"], [0, 1])
         self.assertEqual(result["skip_indices"], [2])
+
+    def test_closed_qbittorrent_is_opened_and_retried(self):
+        class OfflineClient:
+            def request(self, _endpoint):
+                raise qbt.QbtUnavailable("not ready")
+
+        class ReadyClient:
+            def request(self, _endpoint):
+                return b"5.0.0"
+
+        with (
+            patch.object(qbt, "client_from_env", side_effect=[OfflineClient(), ReadyClient()]),
+            patch.object(qbt, "launch_qbittorrent", return_value=True) as launch,
+        ):
+            client = qbt.connected_client(wait_seconds=0)
+        self.assertIsInstance(client, ReadyClient)
+        launch.assert_called_once_with()
+
+    def test_unavailable_qbittorrent_error_is_nontechnical(self):
+        class OfflineClient:
+            def request(self, _endpoint):
+                raise qbt.QbtUnavailable("not ready")
+
+        with (
+            patch.object(qbt, "client_from_env", return_value=OfflineClient()),
+            patch.object(qbt, "launch_qbittorrent", return_value=False),
+        ):
+            with self.assertRaisesRegex(qbt.QbtUnavailable, "app isn't open") as caught:
+                qbt.connected_client(wait_seconds=0)
+        message = str(caught.exception)
+        self.assertNotIn("127.0.0.1", message)
+        self.assertNotIn("port", message.lower())
+
+    def test_macos_launcher_opens_qbittorrent_in_background(self):
+        completed = __import__("subprocess").CompletedProcess([], 0)
+        with (
+            patch.object(qbt.platform, "system", return_value="Darwin"),
+            patch.object(qbt.subprocess, "run", return_value=completed) as run,
+        ):
+            self.assertTrue(qbt.launch_qbittorrent())
+        self.assertEqual(run.call_args.args[0], ["/usr/bin/open", "-g", "-a", "qBittorrent"])
+
+    def test_routine_environment_check_hides_connection_details(self):
+        with patch.object(check_environment.socket, "create_connection", side_effect=OSError("refused")):
+            status = check_environment.qbt_endpoint()
+        self.assertEqual(status["message"], "qBittorrent app isn't open")
+        self.assertNotIn("url", status)
+        self.assertNotIn("error", status)
 
 
 class PolicyTests(unittest.TestCase):

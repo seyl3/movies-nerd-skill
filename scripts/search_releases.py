@@ -18,7 +18,7 @@ from urllib.parse import quote, urlencode, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from _common import GIB
-from qbittorrent_api import QbtError, client_from_env, magnet_hash
+from qbittorrent_api import QbtError, connected_client, magnet_hash
 from rank_releases import normalize
 
 ALLOWED_API_HOSTS = {"api.knaben.org", "apibay.org"}
@@ -241,7 +241,7 @@ def normalize_qbt(payload: object) -> list[dict]:
 
 
 def search_qbt(query: str, timeout: float, series: bool = False) -> list[dict]:
-    client = client_from_env()
+    client = connected_client(wait_seconds=min(3.0, timeout))
     plugins = client.json("search/plugins")
     if not isinstance(plugins, list):
         raise SearchError("qBittorrent returned an invalid provider list")

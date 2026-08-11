@@ -10,7 +10,10 @@ import http.cookiejar
 import json
 import os
 from pathlib import Path, PurePosixPath
+import platform
 import re
+import shutil
+import subprocess
 import sys
 import time
 import unicodedata
@@ -32,13 +35,17 @@ class QbtError(RuntimeError):
     pass
 
 
+class QbtUnavailable(QbtError):
+    """The local qBittorrent application cannot currently be reached."""
+
+
 def checked_base_url(raw: str) -> str:
     value = raw.rstrip("/")
     parsed = urlparse(value)
     if parsed.scheme != "http" or parsed.hostname not in LOOPBACKS or parsed.username or parsed.password:
-        raise QbtError("QBITTORRENT_URL must be an HTTP loopback URL without embedded credentials")
+        raise QbtError("qBittorrent needs its one-time Movies Nerd setup")
     if parsed.path not in ("", "/") or parsed.query or parsed.fragment:
-        raise QbtError("QBITTORRENT_URL must contain only scheme, loopback host, and optional port")
+        raise QbtError("qBittorrent needs its one-time Movies Nerd setup")
     return value
 
 
@@ -91,11 +98,11 @@ class QbtClient:
         self.base_url = checked_base_url(base_url)
         self.opener = build_opener(HTTPCookieProcessor(http.cookiejar.CookieJar()))
         if bool(username) != bool(password):
-            raise QbtError("set both QBITTORRENT_USERNAME and QBITTORRENT_PASSWORD")
+            raise QbtError("qBittorrent needs its one-time Movies Nerd setup")
         if username and password:
             response = self.request("auth/login", {"username": username, "password": password})
             if response.strip() != b"Ok.":
-                raise QbtError("qBittorrent authentication failed")
+                raise QbtError("qBittorrent needs its one-time Movies Nerd setup")
 
     def request(self, endpoint: str, fields: dict[str, str] | None = None, multipart_body: bool = False) -> bytes:
         url = f"{self.base_url}/api/v2/{endpoint}"
@@ -113,12 +120,12 @@ class QbtClient:
             with self.opener.open(request, timeout=8) as response:
                 return response.read(16 * 1024 * 1024)
         except HTTPError as exc:
-            detail = exc.read(1024).decode("utf-8", "replace").strip()
+            exc.read(1024)
             if exc.code == 403:
-                raise QbtError("qBittorrent rejected authentication; check Web UI credentials and IP bans") from exc
-            raise QbtError(f"qBittorrent HTTP {exc.code}: {detail or exc.reason}") from exc
-        except URLError as exc:
-            raise QbtError(f"cannot reach qBittorrent at {self.base_url}: {exc.reason}") from exc
+                raise QbtError("qBittorrent needs its one-time Movies Nerd setup") from exc
+            raise QbtError("qBittorrent couldn't complete the request. Please try again.") from exc
+        except (URLError, TimeoutError) as exc:
+            raise QbtUnavailable("qBittorrent app isn't ready") from exc
 
     def json(self, endpoint: str) -> object:
         try:
@@ -139,6 +146,63 @@ def client_from_env() -> QbtClient:
         os.environ.get("QBITTORRENT_USERNAME"),
         os.environ.get("QBITTORRENT_PASSWORD"),
     )
+
+
+def launch_qbittorrent() -> bool:
+    """Open the installed qBittorrent app without a shell or extra dependency."""
+    system = platform.system()
+    try:
+        if system == "Darwin":
+            completed = subprocess.run(
+                ["/usr/bin/open", "-g", "-a", "qBittorrent"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+            )
+            return completed.returncode == 0
+
+        names = ("qbittorrent.exe", "qbittorrent") if system == "Windows" else ("qbittorrent", "qbittorrent-nox")
+        executable = next((path for name in names if (path := shutil.which(name))), None)
+        if not executable:
+            return False
+        kwargs = {
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+        }
+        if system == "Windows":
+            kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        else:
+            kwargs["start_new_session"] = True
+        subprocess.Popen([executable], **kwargs)
+        return True
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def connected_client(wait_seconds: float = 12.0, retry_interval: float = 0.5) -> QbtClient:
+    """Return a ready client, opening qBittorrent once when it is closed."""
+    try:
+        client = client_from_env()
+        client.request("app/version")
+        return client
+    except QbtUnavailable:
+        pass
+
+    if not launch_qbittorrent():
+        raise QbtUnavailable("qBittorrent app isn't open. Please open it, then try again.")
+
+    deadline = time.monotonic() + max(0.0, wait_seconds)
+    while True:
+        try:
+            client = client_from_env()
+            client.request("app/version")
+            return client
+        except QbtUnavailable:
+            if time.monotonic() >= deadline:
+                raise QbtUnavailable("qBittorrent app isn't open. Please open it, then try again.")
+            time.sleep(max(0.05, retry_interval))
 
 
 def safe_stage(kind: str) -> Path:
@@ -275,8 +339,7 @@ def validate_torrent(client: QbtClient, torrent_hash: str, allow_oversize: bool 
 
 def command_status(client: QbtClient, _args: argparse.Namespace) -> dict:
     version = client.request("app/version").decode("utf-8", "replace").strip()
-    api = client.request("app/webapiVersion").decode("utf-8", "replace").strip()
-    return {"connected": True, "qBittorrent": version, "web_api": api, "url": client.base_url}
+    return {"ready": True, "app": "qBittorrent", "version": version}
 
 
 def command_add(client: QbtClient, args: argparse.Namespace) -> dict:
@@ -448,7 +511,7 @@ def parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = parser().parse_args()
     try:
-        client = client_from_env()
+        client = connected_client()
         handlers = {
             "status": command_status,
             "add-paused": command_add,
