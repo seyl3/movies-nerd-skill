@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Monitor one qBittorrent transfer and emit a safe different-source failover signal."""
+"""Monitor one qBittorrent transfer until complete, stalled, or the watch window ends."""
 
 from __future__ import annotations
 
@@ -10,6 +10,8 @@ import time
 
 from job_manifest import ManifestError, load_job
 from qbittorrent_api import QbtError, connected_client, normalize_hash
+
+CONTINUE_MONITORING = 8
 
 
 def sync_torrent(
@@ -90,6 +92,12 @@ def assess(info: dict, threshold: int, source: str) -> dict:
     peer_fields = ("num_seeds", "num_leechs", "num_complete", "num_incomplete")
     known_peers = sum(max(0, int(info.get(field, 0) or 0)) for field in peer_fields)
     inactive_long_enough = age is not None and age >= threshold
+    finalizing_states = ("checking", "moving", "allocating")
+    complete = (
+        progress >= 0.999999
+        and not state_lower.endswith("dl")
+        and not any(token in state_lower for token in finalizing_states)
+    )
     running_download = progress < 0.999 and not any(token in state_lower for token in ("paused", "stopped", "queued", "error"))
     stalled_state = "stalled" in state_lower or state_lower == "metadl"
     no_peers = known_peers == 0
@@ -107,6 +115,7 @@ def assess(info: dict, threshold: int, source: str) -> dict:
         "source": source,
         "state": state,
         "progress": progress,
+        "complete": complete,
         "download_speed": speed,
         "known_peers": known_peers,
         "activity_age_seconds": age,
@@ -143,6 +152,11 @@ def main() -> int:
             rid, current = sync_torrent(client, torrent_hash, rid, current)
             report = assess(current, args.stall_minutes * 60, args.source)
             report["sync_rid"] = rid
+            if report["complete"]:
+                report["monitoring"] = "complete"
+                report["next"] = "finalize and import the media before ending the user task"
+                print(json.dumps(report, ensure_ascii=False, indent=2))
+                return 0
             if report["stalled"]:
                 candidate = None
                 if args.job:
@@ -161,8 +175,10 @@ def main() -> int:
                 print(json.dumps(report, ensure_ascii=False, indent=2))
                 return 7
             if time.monotonic() >= deadline:
+                report["monitoring"] = "continue"
+                report["next"] = "start another watch window; do not end the user task"
                 print(json.dumps(report, ensure_ascii=False, indent=2))
-                return 0
+                return CONTINUE_MONITORING
             interval = next_poll_interval(report, args.interval)
             time.sleep(min(interval, max(0, deadline - time.monotonic())))
     except (QbtError, OSError, ValueError) as exc:

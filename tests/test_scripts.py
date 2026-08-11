@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import base64
+from contextlib import redirect_stdout
+import io
 import json
 import os
 from pathlib import Path
@@ -441,6 +443,42 @@ class PolicyTests(unittest.TestCase):
         }, threshold=1200, source="source.example")
         self.assertTrue(report["stalled"])
         self.assertEqual(report["failover"]["exclude_source"], "source.example")
+
+    def test_monitor_marks_finished_transfer_complete(self):
+        report = monitor_download.assess({
+            "hash": "0" * 40,
+            "name": "Example",
+            "state": "uploading",
+            "progress": 1.0,
+            "dlspeed": 0,
+        }, threshold=1200, source="source.example")
+        self.assertTrue(report["complete"])
+        self.assertFalse(report["stalled"])
+
+    def test_monitor_window_exit_requires_continuation(self):
+        current = {
+            "hash": "0" * 40,
+            "name": "Example",
+            "state": "downloading",
+            "progress": 0.5,
+            "dlspeed": 1_000_000,
+        }
+        argv = [
+            "monitor_download.py", "--hash", "0" * 40,
+            "--source", "source.example", "--watch-minutes", "0",
+        ]
+        output = io.StringIO()
+        with (
+            patch.object(sys, "argv", argv),
+            patch.object(monitor_download, "connected_client", return_value=object()),
+            patch.object(monitor_download, "sync_torrent", return_value=(1, current)),
+            redirect_stdout(output),
+        ):
+            result = monitor_download.main()
+        report = json.loads(output.getvalue())
+        self.assertEqual(result, monitor_download.CONTINUE_MONITORING)
+        self.assertEqual(report["monitoring"], "continue")
+        self.assertIn("do not end", report["next"])
 
     def test_monitor_merges_incremental_qbittorrent_updates(self):
         class Client:
