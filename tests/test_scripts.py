@@ -31,6 +31,7 @@ import rank_releases
 import remux_mkv
 import search_releases
 import select_payload
+import skill_version
 import subtitle_provider
 import validate_subtitle
 import write_nfo
@@ -51,6 +52,11 @@ class QbittorrentSafetyTests(unittest.TestCase):
         expected = raw.hex()
         self.assertEqual(qbt.magnet_hash(f"magnet:?xt=urn:btih:{expected}"), expected)
         self.assertEqual(qbt.magnet_hash(f"magnet:?xt=urn:btih:{encoded}"), expected)
+
+    def test_skill_version_is_valid_semver(self):
+        version = skill_version.read_version()
+        self.assertIsNotNone(skill_version.SEMVER.fullmatch(version))
+        self.assertEqual(skill_version.label(version), f"Movies Nerd v{version}")
 
     def test_payload_downloads_only_main_video_and_skips_companions(self):
         files = [
