@@ -306,6 +306,52 @@ class PolicyTests(unittest.TestCase):
         self.assertTrue(report["stalled"])
         self.assertEqual(report["failover"]["exclude_source"], "source.example")
 
+    def test_monitor_merges_incremental_qbittorrent_updates(self):
+        class Client:
+            def __init__(self):
+                self.responses = [
+                    {
+                        "rid": 1,
+                        "full_update": True,
+                        "torrents": {
+                            "a" * 40: {
+                                "hash": "a" * 40,
+                                "name": "Example",
+                                "state": "downloading",
+                                "progress": 0.2,
+                                "dlspeed": 1_000_000,
+                                "num_seeds": 10,
+                            },
+                        },
+                    },
+                    {
+                        "rid": 2,
+                        "full_update": False,
+                        "torrents": {"a" * 40: {"progress": 0.4, "dlspeed": 2_000_000}},
+                    },
+                ]
+
+            def json(self, path):
+                return self.responses.pop(0)
+
+        client = Client()
+        rid, current = monitor_download.sync_torrent(client, "a" * 40)
+        rid, current = monitor_download.sync_torrent(client, "a" * 40, rid, current)
+        self.assertEqual(rid, 2)
+        self.assertEqual(current["progress"], 0.4)
+        self.assertEqual(current["state"], "downloading")
+        self.assertEqual(current["num_seeds"], 10)
+
+    def test_monitor_uses_fast_polling_when_transfer_is_inactive(self):
+        self.assertEqual(
+            monitor_download.next_poll_interval({"download_speed": 0, "state": "stalledDL"}, 60),
+            15,
+        )
+        self.assertEqual(
+            monitor_download.next_poll_interval({"download_speed": 1, "state": "downloading"}, 60),
+            60,
+        )
+
     def test_clutter_finder_detects_portuguese_and_apple_files(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

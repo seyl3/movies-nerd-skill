@@ -8,7 +8,49 @@ import json
 import sys
 import time
 
-from qbittorrent_api import QbtError, client_from_env, normalize_hash, torrent_info
+from qbittorrent_api import QbtError, client_from_env, normalize_hash
+
+
+def sync_torrent(
+    client, torrent_hash: str, rid: int = 0, current: dict | None = None,
+) -> tuple[int, dict]:
+    payload = client.json(f"sync/maindata?rid={rid}")
+    if not isinstance(payload, dict):
+        raise QbtError("qBittorrent returned invalid incremental sync data")
+    try:
+        next_rid = int(payload.get("rid"))
+    except (TypeError, ValueError) as exc:
+        raise QbtError("qBittorrent returned an invalid sync response ID") from exc
+    if next_rid < 0:
+        raise QbtError("qBittorrent returned an invalid sync response ID")
+    normalized = normalize_hash(torrent_hash)
+    removed = {str(value).lower() for value in payload.get("torrents_removed") or []}
+    if normalized in removed:
+        raise QbtError("torrent was removed from qBittorrent during monitoring")
+    merged = {} if payload.get("full_update") else dict(current or {})
+    torrents = payload.get("torrents") or {}
+    if not isinstance(torrents, dict):
+        raise QbtError("qBittorrent returned invalid torrent sync data")
+    delta = torrents.get(normalized)
+    if delta is None:
+        delta = torrents.get(normalized.upper())
+    if delta is not None:
+        if not isinstance(delta, dict):
+            raise QbtError("qBittorrent returned an invalid torrent delta")
+        merged.update(delta)
+    if not merged:
+        raise QbtError("torrent is not present in qBittorrent incremental data")
+    merged.setdefault("hash", normalized)
+    return next_rid, merged
+
+
+def next_poll_interval(report: dict, configured: int) -> int:
+    state = str(report.get("state") or "").lower()
+    if report.get("download_speed", 0) <= 0 or any(
+        token in state for token in ("meta", "checking", "queued")
+    ):
+        return min(configured, 15)
+    return configured
 
 
 def activity_age(info: dict, now: int) -> int | None:
@@ -79,8 +121,12 @@ def main() -> int:
         torrent_hash = normalize_hash(args.hash)
         client = client_from_env()
         deadline = time.monotonic() + args.watch_minutes * 60
+        rid = 0
+        current = None
         while True:
-            report = assess(torrent_info(client, torrent_hash), args.stall_minutes * 60, args.source)
+            rid, current = sync_torrent(client, torrent_hash, rid, current)
+            report = assess(current, args.stall_minutes * 60, args.source)
+            report["sync_rid"] = rid
             if report["stalled"]:
                 if args.stop_on_stall:
                     client.request("torrents/stop", {"hashes": torrent_hash})
@@ -91,7 +137,8 @@ def main() -> int:
             if time.monotonic() >= deadline:
                 print(json.dumps(report, ensure_ascii=False, indent=2))
                 return 0
-            time.sleep(min(args.interval, max(0, deadline - time.monotonic())))
+            interval = next_poll_interval(report, args.interval)
+            time.sleep(min(interval, max(0, deadline - time.monotonic())))
     except (QbtError, OSError, ValueError) as exc:
         print(json.dumps({"error": str(exc)}, indent=2), file=sys.stderr)
         return 2
