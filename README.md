@@ -1,12 +1,12 @@
 # Movies Nerd
 
-Movies Nerd is an opinionated, all-in-one Codex skill for nontechnical film fans. No torrent or command-line knowledge is expected: it shows one good option, asks once, then downloads and organizes everything in the background.
+Movies Nerd is an opinionated, all-in-one Codex skill for nontechnical film fans. No torrent or command-line knowledge is expected: it shows one good option, asks once, stays with the download until it is organized, then returns film links and recommendations.
 
 ## Features
 
 - Picks an efficient 4K release up to 15 GiB, or a space-efficient 1080p fallback.
 - Searches concurrent no-key APIs first and opens EXT only when the fast path finds nothing usable.
-- Opens and uses local qBittorrent automatically, prepares a different-source backup, monitors stalls, skips extras, and prefers MKV without needless conversion.
+- Opens and uses local qBittorrent automatically, stays with the transfer through completion, replaces stalled downloads with approval, skips extras, and prefers MKV without needless conversion.
 - Creates clean movie/series folders with posters, NFO metadata, track labels, and English/French subtitles. It uses OpenSubtitles with `OPENSUBTITLES_API_KEY`, or Subtitle Cat without one.
 - Prepares metadata, artwork, subtitles, and recommendations while the transfer runs so finalization stays short.
 - Suggests a similar film and another by the director, with verified Letterboxd and SensCritique links.

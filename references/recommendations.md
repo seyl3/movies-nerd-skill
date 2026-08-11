@@ -12,7 +12,7 @@ Use this after a movie—not a series episode—has been successfully imported i
 
 ## Verify direct links
 
-Recommendations are current web lookups. For each recommended film:
+Film pages are current web lookups. Verify links for the completed movie and each recommended film:
 
 1. Search Letterboxd and SensCritique using the exact title, year, and director.
 2. Open the candidate page and verify its title, release year, and director.
@@ -25,11 +25,14 @@ Recommendations are current web lookups. For each recommended film:
 Keep the completion response short:
 
 ```text
-Ready: Movie (Year) [1080p]
+Downloaded and organized: Movie (Year) [1080p]
+Movie pages: Letterboxd · SensCritique
 
 You may like:
 - Similar — Film (Year): one brief reason. Letterboxd · SensCritique
 - More from Director — Film (Year): one brief reason. Letterboxd · SensCritique
+
+Have a good watch!
 ```
 
-Make `Letterboxd` and `SensCritique` direct clickable links for each recommendation. Do not describe how the recommendations or links were found unless the user asks.
+Make `Letterboxd` and `SensCritique` direct clickable links for the completed movie and each recommendation. Do not describe how the recommendations or links were found unless the user asks.

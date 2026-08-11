@@ -9,7 +9,7 @@ Start these jobs concurrently after Gate 1 succeeds:
 - Resolve the canonical destination names and authoritative IDs.
 - Fetch the exact movie or series metadata, poster, fanart, and clear logo when available.
 - Search for English and French subtitles using the confirmed release name. Download only into staging and validate there; never write beside an incomplete video.
-- Resolve the two post-download recommendations and verify their direct Letterboxd and SensCritique pages for a movie.
+- Verify the completed movie's direct Letterboxd and SensCritique pages. Resolve the two post-download recommendations and verify their direct pages too.
 
 Keep every prepared artifact in the matching hidden staging root. Do not inspect incomplete media, generate final NFO runtime or stream fields from provisional tracker data, or move anything into the library before Gate 2 passes.
 
@@ -27,6 +27,6 @@ Do not rescan the entire library during finalization. Persist exact-title metada
 ## Time budget and user experience
 
 - For a compliant MKV with sidecars prepared during download, target under one minute from transfer completion to a ready library entry.
-- Run independent network work concurrently with bounded timeouts. A slow optional clear logo or recommendation link must not hold the media import open.
+- Run independent network work concurrently with bounded timeouts. Begin film-link verification during the transfer. If one cannot be verified by completion, mark that link unavailable rather than holding the media import open.
 - Safety gates, exact-title matching, subtitle validation, and atomic installation are never skipped to meet a time target.
-- Report one short completion message. Mention an optional artifact only when it remains unavailable; do not expose background job or cache details.
+- A successful transfer start is not a completion message. Keep the task active through finalization, then report one short watch-ready handoff. Mention an optional artifact only when it remains unavailable; do not expose background job or cache details.
