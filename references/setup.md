@@ -2,6 +2,8 @@
 
 Movies Nerd intentionally has a small dependency surface. It does not install software by itself.
 
+This is a one-time technical reference for installation or troubleshooting. Do not repeat its addresses, ports, commands, or configuration terms during a normal movie request. Once configured, Movies Nerd opens qBittorrent itself and keeps these details out of the user conversation.
+
 ## Required software
 
 1. Python 3.11 or newer. All bundled Python scripts use only the standard library.

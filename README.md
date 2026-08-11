@@ -1,12 +1,12 @@
 # Movies Nerd
 
-Movies Nerd is an opinionated, all-in-one Codex skill for film fans. A specific-title request is treated as authorization; it shows quality, size, peers, and source, then asks once before downloading.
+Movies Nerd is an opinionated, all-in-one Codex skill for nontechnical film fans. No torrent or command-line knowledge is expected: it shows one good option, asks once, then downloads and organizes everything in the background.
 
 ## Features
 
 - Picks an efficient 4K release up to 15 GiB, or a space-efficient 1080p fallback.
 - Searches concurrent no-key APIs first and opens EXT only when the fast path finds nothing usable.
-- Uses local qBittorrent, prepares a different-source backup, monitors stalls incrementally, skips extras, and prefers MKV without re-encoding or needless rewrites.
+- Opens and uses local qBittorrent automatically, prepares a different-source backup, monitors stalls, skips extras, and prefers MKV without needless conversion.
 - Creates clean movie/series folders with posters, NFO metadata, track labels, and English/French subtitles. It uses OpenSubtitles with `OPENSUBTITLES_API_KEY`, or Subtitle Cat without one.
 - Prepares metadata, artwork, subtitles, and recommendations while the transfer runs so finalization stays short.
 - Suggests a similar film and another by the director, with verified Letterboxd and SensCritique links.
@@ -21,18 +21,11 @@ Movies and series roots are selected independently when needed. Their folder nam
 
 ## Setup
 
-Requires Python 3.11+, qBittorrent 5.x, and FFmpeg/ffprobe. Optional MKVToolNix enables fast header-only edits. Scripts use Python's standard library—no Node.js, npm, Docker, scraper server, or automatic installer.
-
-Follow [setup](references/setup.md), enable qBittorrent's Web UI on `127.0.0.1`, set `QBITTORRENT_USERNAME` and `QBITTORRENT_PASSWORD`, then run:
-
-```sh
-python3 scripts/check_environment.py
-python3 scripts/qbittorrent_api.py status
-```
+Requires Python 3.11+, qBittorrent 5.x, and FFmpeg/ffprobe. Optional MKVToolNix makes some metadata edits faster. Scripts use Python's standard library—no Node.js, npm, Docker, or scraper server. See the one-time [setup guide](references/setup.md) only when installing on a new machine.
 
 ## Safety
 
-This clean-room project runs no third-party scraper code. Downloads use private staging, loopback-only qBittorrent, and two checks that reject dangerous files, archives, spoofed paths, symlinks, and invalid media. The client cannot delete torrents. Optional macOS sandboxing adds isolation; media hashes and checksum manifests are omitted. See [security policy](references/security-policy.md).
+This clean-room project runs no third-party scraper code. Downloads use private staging, a local-only qBittorrent connection, and two checks that reject dangerous files, archives, spoofed paths, symlinks, and invalid media. The client cannot delete torrents. Optional macOS sandboxing adds isolation; media hashes and checksum manifests are omitted. See [security policy](references/security-policy.md).
 
 ## Use
 
