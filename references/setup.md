@@ -13,6 +13,14 @@ Optional on macOS: `/usr/bin/sandbox-exec`. The launcher uses it as defense in d
 
 No Node.js, npm packages, Docker image, browser extension, cloned scraper server, or Python package is required.
 
+## Configure fast search
+
+No search key or account is required. `scripts/search_releases.py` queries the Knaben and APIBay HTTPS JSON APIs concurrently, then falls back to EXT only when necessary. It uses the operating system's `curl` command only if Python's TLS trust store is broken; current macOS, Windows, and common Linux installations normally include it.
+
+For broader coverage, optionally configure Jackett and add its Torznab feeds to qBittorrent's search engine. qBittorrent recommends Jackett, but Movies Nerd never installs it automatically. Keep Jackett on `127.0.0.1`, configure only the indexers you trust, and store its generated API key in qBittorrent rather than this repository.
+
+If a future supported high-quality provider offers a free API key, Movies Nerd may offer it once. Declining must immediately continue through the no-key route.
+
 ## Configure subtitles
 
 An OpenSubtitles API key is optional. If one is available, expose it through the current shell or an approved secret manager:
