@@ -21,6 +21,7 @@ import opensubtitles_api
 import payload_safety
 import rank_releases
 import remux_mkv
+import search_releases
 import select_payload
 import subtitle_provider
 import validate_subtitle
@@ -144,6 +145,47 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(ranked[0]["size_efficiency"]["rating"], "balanced")
         self.assertEqual(ranked[1]["size_efficiency"]["rating"], "bloated")
         self.assertTrue(any("large for its runtime" in warning for warning in ranked[1]["warnings"]))
+
+    def test_knaben_results_are_normalized_and_magnets_sanitized(self):
+        payload = {
+            "hits": [{
+                "title": "Example 2024 1080p x265",
+                "bytes": 2_500_000_000,
+                "seeders": 40,
+                "peers": 5,
+                "tracker": "1337x",
+                "hash": "a" * 40,
+                "magnetUrl": "magnet:?xt=urn:btih:" + "a" * 40 + "&ws=file:///tmp/bad",
+            }]
+        }
+        result = search_releases.normalize_knaben(payload)[0]
+        self.assertEqual(result["source"], "1337x")
+        self.assertEqual(result["leechers"], 5)
+        self.assertNotIn("ws=", result["magnet"])
+        self.assertEqual(search_releases.magnet_hash(result["magnet"]), "a" * 40)
+
+    def test_apibay_results_are_normalized_without_extra_trackers(self):
+        payload = [{
+            "name": "Example 2024 2160p HEVC",
+            "size": "12000000000",
+            "seeders": "25",
+            "leechers": "3",
+            "info_hash": "b" * 40,
+        }]
+        result = search_releases.normalize_apibay(payload)[0]
+        self.assertEqual(result["provider"], "APIBay")
+        self.assertEqual(result["seeders"], 25)
+        self.assertNotIn("&tr=", result["magnet"])
+
+    def test_api_search_deduplicates_by_info_hash(self):
+        first = {
+            "title": "Example 1080p x265", "size": 2_000_000_000,
+            "seeders": 10, "magnet": search_releases.minimal_magnet("c" * 40, "Example"),
+        }
+        second = {**first, "seeders": 50, "source": "faster"}
+        result = search_releases.deduplicate([first, second])
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["seeders"], 50)
 
     def test_nfo_escapes_untrusted_text(self):
         payload = write_nfo.render("movie", {"title": "A & B <C>", "year": 2024})

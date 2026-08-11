@@ -12,6 +12,7 @@ shift
 case "$ACTION" in
   check-environment) MODE=offline; SCRIPT=check_environment.py ;;
   rank-releases) MODE=offline; SCRIPT=rank_releases.py ;;
+  search-releases) MODE=network-readonly; SCRIPT=search_releases.py ;;
   select-payload) MODE=offline; SCRIPT=select_payload.py ;;
   check-subtitles) MODE=offline; SCRIPT=check_subtitles.py ;;
   subtitle-provider) MODE=offline; SCRIPT=subtitle_provider.py ;;
