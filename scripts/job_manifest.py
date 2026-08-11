@@ -38,6 +38,68 @@ DEFAULT_STEPS = {
     "subtitles": "pending",
     "library_import": "pending",
 }
+EVENT_PATCHES = {
+    "confirmed": {
+        "state": "confirmed",
+        "steps": {"search": "complete", "confirmation": "complete"},
+    },
+    "metadata-started": {
+        "state": "confirmed",
+        "steps": {"search": "complete", "confirmation": "complete", "metadata_gate": "running"},
+    },
+    "metadata-failed": {
+        "state": "failed",
+        "steps": {
+            "search": "complete", "confirmation": "complete",
+            "metadata_gate": "failed", "transfer": "skipped",
+        },
+    },
+    "replacement-started": {
+        "state": "confirmed",
+        "artifacts": {"failure_reason": None},
+        "steps": {
+            "confirmation": "complete", "metadata_gate": "running",
+            "transfer": "pending",
+        },
+    },
+    "stalled": {
+        "state": "stalled",
+        "steps": {"transfer": "failed"},
+    },
+    "downloading": {
+        "state": "downloading",
+        "artifacts": {"failure_reason": None},
+        "steps": {
+            "search": "complete", "confirmation": "complete",
+            "metadata_gate": "complete", "transfer": "running",
+        },
+    },
+    "downloaded": {
+        "state": "downloaded",
+        "steps": {"transfer": "complete"},
+    },
+    "verified": {
+        "state": "verified",
+        "steps": {"content_gate": "complete", "media_probe": "complete"},
+    },
+    "imported": {
+        "state": "imported",
+        "steps": {"subtitles": "complete", "library_import": "complete"},
+    },
+    "failed": {"state": "failed"},
+}
+EVENT_FROM_STATES = {
+    "confirmed": {"planned", "confirmed"},
+    "metadata-started": {"confirmed"},
+    "metadata-failed": {"confirmed"},
+    "replacement-started": {"downloading", "stalled"},
+    "stalled": {"downloading"},
+    "downloading": {"confirmed"},
+    "downloaded": {"downloading"},
+    "verified": {"downloaded"},
+    "imported": {"verified"},
+    "failed": STATES - {"imported"},
+}
 
 
 class ManifestError(ValueError):
@@ -254,6 +316,84 @@ def update_job(
     return updated
 
 
+def transition_job(
+    path: str | Path, event: str, *, reason: str | None = None,
+    torrent_hash: str | None = None, release: dict | None = None,
+    environ: dict[str, str] | None = None,
+) -> dict:
+    """Apply one consistent workflow transition instead of ad-hoc state patches."""
+    _, current = load_job(path, environ)
+    if event not in EVENT_PATCHES:
+        raise ManifestError(f"unknown job event: {event}")
+    if current.get("state") not in EVENT_FROM_STATES[event]:
+        raise ManifestError(
+            f"cannot apply {event} while job state is {current.get('state')}"
+        )
+    patch = deepcopy(EVENT_PATCHES[event])
+    artifacts = {}
+    if reason:
+        artifacts["failure_reason"] = reason.strip()[:1000]
+    if torrent_hash:
+        try:
+            artifacts["torrent_hash"] = magnet_hash(
+                f"magnet:?xt=urn:btih:{torrent_hash}"
+            )
+        except QbtError as exc:
+            raise ManifestError("transition has an invalid torrent hash") from exc
+    if artifacts:
+        patch["artifacts"] = artifacts
+    if release is not None:
+        patch["release"] = checked_release(release)
+    if event == "failed":
+        steps = deepcopy(current.get("steps") or {})
+        for name, status in steps.items():
+            if status == "running":
+                steps[name] = "failed"
+        patch["steps"] = steps
+    return update_job(path, patch, environ)
+
+
+def archive_failed_job(
+    path: str | Path, environ: dict[str, str] | None = None,
+) -> dict:
+    """Move exact failed job state out of .incoming while keeping it recoverable."""
+    checked, current = load_job(path, environ)
+    if current.get("state") != "failed":
+        raise ManifestError("only a failed job can be archived")
+    stage = checked.parent.parent
+    library = stage.parent.parent
+    if stage.name != "Movies Nerd" or stage.parent.name != ".incoming":
+        raise ManifestError("failed job is outside the exact Movies Nerd staging layout")
+    archive = (
+        library / ".movies-nerd-trash" / "failed-jobs"
+        / f"{now_utc().replace(':', '-')}-{current['job_id'][:8]}"
+    )
+    archive.mkdir(mode=0o700, parents=True, exist_ok=False)
+    destination = archive / checked.name
+    os.replace(checked, destination)
+    sidecar = checked.with_name("._" + checked.name)
+    if sidecar.is_file() and not sidecar.is_symlink():
+        os.replace(sidecar, archive / sidecar.name)
+    try:
+        checked.parent.rmdir()
+    except OSError:
+        pass
+    else:
+        jobs_sidecar = checked.parent.with_name("._" + checked.parent.name)
+        if jobs_sidecar.is_file() and not jobs_sidecar.is_symlink():
+            jobs_sidecar.unlink(missing_ok=True)
+    transfers = stage / "transfers"
+    try:
+        transfers.rmdir()
+    except OSError:
+        pass
+    else:
+        transfer_sidecar = transfers.with_name("._" + transfers.name)
+        if transfer_sidecar.is_file() and not transfer_sidecar.is_symlink():
+            transfer_sidecar.unlink(missing_ok=True)
+    return {"archived": True, "from": str(checked), "to": str(destination)}
+
+
 def checked_release(value: object) -> dict:
     if not isinstance(value, dict):
         raise ManifestError("search selection is missing a release")
@@ -312,9 +452,26 @@ def record_search(
             raise ManifestError("backup release duplicates the primary release")
         if str(primary["source"]).strip().casefold() == str(backup["source"]).strip().casefold():
             raise ManifestError("backup release must use a different source")
+    raw_pool = selection.get("candidates")
+    if raw_pool is None:
+        raw_pool = [value for value in (selection.get("primary"), raw_backup) if value]
+    if not isinstance(raw_pool, list) or not 1 <= len(raw_pool) <= 3:
+        raise ManifestError("search selection must contain one to three race candidates")
+    candidate_pool = []
+    hashes = set()
+    for value in raw_pool:
+        candidate = checked_release(value)
+        info_hash = magnet_hash(candidate["magnet"])
+        if info_hash in hashes:
+            continue
+        hashes.add(info_hash)
+        candidate_pool.append(candidate)
+    if not candidate_pool or magnet_hash(primary["magnet"]) != magnet_hash(candidate_pool[0]["magnet"]):
+        raise ManifestError("race candidates must begin with the selected primary release")
     patch = {
         "release": primary,
         "backup_release": backup,
+        "candidate_pool": candidate_pool,
         "steps": {"search": "complete"},
         "cache": {
             "search_summary": {
@@ -358,6 +515,14 @@ def main() -> int:
     show = subparsers.add_parser("show")
     show.add_argument("job")
     show.add_argument("--raw", action="store_true")
+    transition = subparsers.add_parser("transition")
+    transition.add_argument("job")
+    transition.add_argument("--event", choices=tuple(EVENT_PATCHES), required=True)
+    transition.add_argument("--reason")
+    transition.add_argument("--torrent-hash")
+    archive = subparsers.add_parser("archive-failed")
+    archive.add_argument("job")
+    archive.add_argument("--commit", action="store_true")
     args = parser.parse_args()
     try:
         if args.command == "create":
@@ -373,6 +538,15 @@ def main() -> int:
         elif args.command == "record-search":
             value = record_search(args.job, args.search_result)
             print(json.dumps({"job": str(Path(args.job)), "manifest": redacted(value)}, ensure_ascii=False, indent=2))
+        elif args.command == "transition":
+            value = transition_job(
+                args.job, args.event, reason=args.reason, torrent_hash=args.torrent_hash,
+            )
+            print(json.dumps({"job": str(Path(args.job)), "manifest": redacted(value)}, ensure_ascii=False, indent=2))
+        elif args.command == "archive-failed":
+            if not args.commit:
+                raise ManifestError("refusing to archive failed job without --commit")
+            print(json.dumps(archive_failed_job(args.job), ensure_ascii=False, indent=2))
         else:
             _, value = load_job(args.job)
             print(json.dumps(value if args.raw else redacted(value), ensure_ascii=False, indent=2))

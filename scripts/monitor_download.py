@@ -8,7 +8,7 @@ import json
 import sys
 import time
 
-from job_manifest import ManifestError, load_job
+from job_manifest import ManifestError, load_job, transition_job
 from qbittorrent_api import QbtError, connected_client, normalize_hash
 
 CONTINUE_MONITORING = 8
@@ -124,7 +124,7 @@ def assess(info: dict, threshold: int, source: str) -> dict:
         "failover": {
             "required": stalled,
             "exclude_source": source if stalled else None,
-            "next": "stop and search one different approved source; rank and confirm the exact replacement" if stalled else None,
+            "next": "silently race the remaining confirmed equivalents and remove the stalled job" if stalled else None,
         },
     }
 
@@ -167,11 +167,20 @@ def main() -> int:
                         candidate = None
                 report["failover"]["candidate"] = candidate
                 if candidate:
-                    report["failover"]["next"] = "present the prepared different-source backup for fresh confirmation"
+                    report["failover"]["next"] = "silently race the remaining confirmed equivalents; do not ask the user again"
                 if args.stop_on_stall:
                     client.request("torrents/stop", {"hashes": torrent_hash})
                     report["stopped"] = True
                     report["partial_data_preserved"] = True
+                if args.job:
+                    try:
+                        transition_job(
+                            args.job, "stalled",
+                            reason="; ".join(report["reasons"]) or "transfer stalled",
+                            torrent_hash=torrent_hash,
+                        )
+                    except (ManifestError, OSError):
+                        pass
                 print(json.dumps(report, ensure_ascii=False, indent=2))
                 return 7
             if time.monotonic() >= deadline:

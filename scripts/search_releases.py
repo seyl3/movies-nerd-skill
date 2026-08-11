@@ -21,7 +21,7 @@ from _common import GIB
 from qbittorrent_api import QbtError, connected_client, magnet_hash
 from rank_releases import normalize
 
-ALLOWED_API_HOSTS = {"api.knaben.org", "apibay.org"}
+ALLOWED_API_HOSTS = {"api.knaben.org", "apibay.org", "magnetz.eu", "yts.gg"}
 MAX_RESPONSE_BYTES = 5 * 1024 * 1024
 MAX_RESULTS_PER_PROVIDER = 100
 CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
@@ -215,6 +215,84 @@ def search_apibay(query: str, timeout: float) -> list[dict]:
     return normalize_apibay(fetch_json(url, timeout))
 
 
+def normalize_magnetz(payload: object) -> list[dict]:
+    if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+        raise SearchError("Magnetz returned an unexpected response")
+    results = []
+    for item in payload["data"][:MAX_RESULTS_PER_PROVIDER]:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("name") or "").strip()
+        magnet = sanitized_magnet(item.get("magnet_link"), item.get("info_hash"), title)
+        size = safe_int(item.get("size"))
+        if not title or not magnet or size <= 0:
+            continue
+        results.append({
+            "title": title,
+            "size": size,
+            "seeders": safe_int(item.get("seeders")),
+            "leechers": safe_int(item.get("leechers")),
+            "source": "Magnetz",
+            "provider": "Magnetz API",
+            "magnet": magnet,
+        })
+    return results
+
+
+def search_magnetz(query: str, timeout: float) -> list[dict]:
+    url = "https://magnetz.eu/api/magnets/search?" + urlencode({"query": query, "page": 1})
+    return normalize_magnetz(fetch_json(url, timeout))
+
+
+def normalize_yts(payload: object) -> list[dict]:
+    if not isinstance(payload, dict) or payload.get("status") != "ok":
+        raise SearchError("YTS returned an unexpected response")
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        raise SearchError("YTS returned an unexpected response")
+    movies = data.get("movies") or []
+    if not isinstance(movies, list):
+        raise SearchError("YTS returned an unexpected movie list")
+    results = []
+    for movie in movies[:MAX_RESULTS_PER_PROVIDER]:
+        if not isinstance(movie, dict):
+            continue
+        movie_title = str(movie.get("title") or "").strip()
+        year = safe_int(movie.get("year"))
+        torrents = movie.get("torrents") or []
+        if not movie_title or not isinstance(torrents, list):
+            continue
+        for torrent in torrents[:12]:
+            if not isinstance(torrent, dict):
+                continue
+            quality = str(torrent.get("quality") or "").strip()
+            release_type = str(torrent.get("type") or "").strip()
+            codec = str(torrent.get("video_codec") or "").strip()
+            title = " ".join(
+                value for value in (movie_title, f"({year})" if year else "", quality, release_type, codec)
+                if value
+            )
+            magnet = minimal_magnet(torrent.get("hash"), title)
+            size = safe_int(torrent.get("size_bytes"))
+            if not magnet or size <= 0:
+                continue
+            results.append({
+                "title": title,
+                "size": size,
+                "seeders": safe_int(torrent.get("seeds")),
+                "leechers": safe_int(torrent.get("peers")),
+                "source": "YTS",
+                "provider": "YTS API",
+                "magnet": magnet,
+            })
+    return results
+
+
+def search_yts(title: str, timeout: float) -> list[dict]:
+    url = "https://yts.gg/api/v2/list_movies.json?" + urlencode({"query_term": title, "limit": 50})
+    return normalize_yts(fetch_json(url, timeout))
+
+
 def normalize_qbt(payload: object) -> list[dict]:
     if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
         raise SearchError("qBittorrent returned unexpected search results")
@@ -389,7 +467,38 @@ def release_selection(
             (item for item in candidates[1:] if source_key(item.get("source")) != primary_source),
             None,
         )
-    return {"primary": primary, "backup": backup, "eligible_count": len(candidates)}
+    compatible = []
+    if primary:
+        compatible = [
+            item for item in candidates
+            if item["resolution"] == primary["resolution"]
+            and item["size_bytes"] <= primary["size_bytes"]
+        ]
+    race_candidates = []
+    seen_sources = set()
+    for item in compatible:
+        key = source_key(item.get("source"))
+        if key in seen_sources:
+            continue
+        race_candidates.append(item)
+        seen_sources.add(key)
+        if len(race_candidates) == 3:
+            break
+    if len(race_candidates) < 3:
+        selected_hashes = {magnet_hash(item["magnet"]) for item in race_candidates}
+        for item in compatible:
+            if magnet_hash(item["magnet"]) in selected_hashes:
+                continue
+            race_candidates.append(item)
+            selected_hashes.add(magnet_hash(item["magnet"]))
+            if len(race_candidates) == 3:
+                break
+    return {
+        "primary": primary,
+        "backup": backup,
+        "candidates": race_candidates,
+        "eligible_count": len(candidates),
+    }
 
 
 def run_providers(providers: dict[str, object]) -> tuple[list[dict], dict]:
@@ -414,10 +523,12 @@ def search_all(
     minimum_usable: int = 3,
 ) -> tuple[list[dict], dict, bool]:
     started = time.monotonic()
-    fast_timeout = min(2.0, timeout)
+    fast_timeout = min(3.5, timeout)
     combined, reports = run_providers({
         "knaben": lambda: search_knaben(query, fast_timeout),
         "apibay": lambda: search_apibay(query, fast_timeout),
+        "magnetz": lambda: search_magnetz(query, fast_timeout),
+        "yts": lambda: search_yts(title, fast_timeout),
     })
     combined = deduplicate(combined)
     fast_selection = release_selection(combined, title, year, max_bytes, runtime_minutes)
