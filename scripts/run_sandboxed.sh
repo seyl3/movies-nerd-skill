@@ -22,6 +22,7 @@ case "$ACTION" in
   plan-library) MODE=offline; SCRIPT=plan_library.py ;;
   write-nfo) MODE=library; SCRIPT=write_nfo.py ;;
   clean-clutter) MODE=library; SCRIPT=clean_clutter.py ;;
+  finish-staging) MODE=library; SCRIPT=finish_staging.py ;;
   probe-ext) MODE=network-readonly; SCRIPT=probe_ext.py ;;
   qbt) MODE=qbt; SCRIPT=qbittorrent_api.py ;;
   monitor-download) MODE=qbt; SCRIPT=monitor_download.py ;;

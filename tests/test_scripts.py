@@ -21,6 +21,7 @@ import clean_clutter
 import check_environment
 import check_subtitles
 import edit_mkv_headers
+import finish_staging
 import job_manifest
 import media_probe
 import monitor_download
@@ -51,7 +52,7 @@ class QbittorrentSafetyTests(unittest.TestCase):
         self.assertEqual(qbt.magnet_hash(f"magnet:?xt=urn:btih:{expected}"), expected)
         self.assertEqual(qbt.magnet_hash(f"magnet:?xt=urn:btih:{encoded}"), expected)
 
-    def test_payload_omits_extras_and_rejects_executable(self):
+    def test_payload_downloads_only_main_video_and_skips_companions(self):
         files = [
             {"index": 0, "name": "Movie/Movie.mkv", "size": 8_000_000_000, "priority": 1},
             {"index": 1, "name": "Movie/Featurettes/Interview.mkv", "size": 1_000_000_000, "priority": 1},
@@ -60,19 +61,33 @@ class QbittorrentSafetyTests(unittest.TestCase):
         ]
         result = qbt.classify_files(files)
         self.assertEqual(result["main_feature"]["index"], 0)
+        self.assertEqual(result["keep_indices"], [0])
         self.assertIn(1, result["skip_indices"])
-        self.assertEqual(result["unsafe"][0]["index"], 3)
+        self.assertIn(2, result["skip_indices"])
+        self.assertIn(3, result["skip_indices"])
+        self.assertEqual(result["unsafe"], [])
+        self.assertEqual(result["selected_size"], 8_000_000_000)
 
-    def test_metadata_gate_rejects_double_extensions_and_bidi_spoofing(self):
+    def test_metadata_gate_skips_suspicious_files_but_rejects_spoofing(self):
         files = [
             {"index": 0, "name": "Movie/Movie.mkv", "size": 1_000_000_000},
             {"index": 1, "name": "Movie/setup.exe.mkv", "size": 1_000_000},
             {"index": 2, "name": "Movie/\u202espoof.mkv", "size": 1_000_000},
         ]
         result = qbt.classify_files(files)
-        self.assertEqual([item["index"] for item in result["unsafe"]], [1, 2])
-        self.assertIn("inner extension", result["unsafe"][0]["unsafe_reasons"][0])
-        self.assertTrue(any("spoofing" in reason for reason in result["unsafe"][1]["unsafe_reasons"]))
+        self.assertEqual(result["keep_indices"], [0])
+        self.assertIn(1, result["skip_indices"])
+        self.assertEqual([item["index"] for item in result["unsafe"]], [2])
+        self.assertTrue(any("spoofing" in reason for reason in result["unsafe"][0]["unsafe_reasons"]))
+
+    def test_metadata_gate_rejects_traversal_even_for_skipped_file(self):
+        files = [
+            {"index": 0, "name": "Movie/Movie.mkv", "size": 1_000_000_000},
+            {"index": 1, "name": "../setup.exe", "size": 1_000_000},
+        ]
+        result = qbt.classify_files(files)
+        self.assertEqual([item["index"] for item in result["unsafe"]], [1])
+        self.assertTrue(any("traversing" in reason for reason in result["unsafe"][0]["hard_reasons"]))
 
     def test_metadata_gate_rejects_malformed_and_colliding_records(self):
         files = [
@@ -146,6 +161,31 @@ class QbittorrentSafetyTests(unittest.TestCase):
         ):
             self.assertTrue(qbt.launch_qbittorrent())
         self.assertEqual(run.call_args.args[0], ["/usr/bin/open", "-g", "-a", "qBittorrent"])
+
+    def test_torrent_isolated_in_its_own_transfer_directory(self):
+        class Client:
+            def __init__(self):
+                self.fields = None
+
+            def request(self, _endpoint, fields, multipart_body=False):
+                self.fields = fields
+                self.multipart_body = multipart_body
+                return b"Ok."
+
+        with tempfile.TemporaryDirectory() as raw:
+            movie_stage = Path(raw) / "Movies" / ".incoming" / "Movies Nerd"
+            series_stage = Path(raw) / "Series" / ".incoming" / "Movies Nerd"
+            client = Client()
+            args = __import__("argparse").Namespace(
+                magnet="magnet:?xt=urn:btih:" + "a" * 40,
+                kind="movie",
+                rename="Example (2024)",
+                commit=True,
+            )
+            with patch.object(qbt, "staging_roots", return_value=(movie_stage, series_stage)):
+                result = qbt.command_add(client, args)
+        self.assertTrue(result["staging"].endswith("/transfers/" + "a" * 40))
+        self.assertEqual(client.fields["savepath"], result["staging"])
 
     def test_routine_environment_check_hides_connection_details(self):
         with patch.object(check_environment.socket, "create_connection", side_effect=OSError("refused")):
@@ -548,6 +588,38 @@ class PolicyTests(unittest.TestCase):
             names = [path.name for path in clean_clutter.targets(root)]
             self.assertEqual(names, [".DS_Store", "Film.pt.srt"])
 
+    def test_finished_job_leaves_incoming_recoverably(self):
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            movies = base / "Movies"
+            series = base / "Series"
+            stage = movies / ".incoming" / "Movies Nerd"
+            source = stage / "transfers" / ("a" * 40)
+            source.mkdir(parents=True)
+            (source / "junk.nfo").write_bytes(b"untrusted")
+            sidecar = source.with_name("._" + source.name)
+            sidecar.write_bytes(b"AppleDouble")
+            final = movies / "Director" / "Example (2024)"
+            final.mkdir(parents=True)
+            (final / "Example (2024) [1080p].mkv").write_bytes(b"video")
+            (final / "Example (2024) [1080p].nfo").write_text("<movie/>", encoding="utf-8")
+            (final / "Example (2024).png").write_bytes(b"image")
+            with (
+                patch.object(finish_staging, "library_roots", return_value=(movies, series)),
+                patch.object(
+                    finish_staging, "staging_roots",
+                    return_value=(stage, series / ".incoming" / "Movies Nerd"),
+                ),
+            ):
+                library, fixed_stage = finish_staging.library_for(final)
+                checked = finish_staging.checked_targets([source], fixed_stage)
+                quarantine, moved = finish_staging.quarantine_targets(checked, fixed_stage, library)
+            self.assertFalse(source.exists())
+            self.assertFalse(sidecar.exists())
+            self.assertEqual(len(moved), 2)
+            self.assertTrue(quarantine.is_dir())
+            self.assertTrue((quarantine / "transfers" / ("a" * 40) / "junk.nfo").is_file())
+
     def test_subtitle_provider_asks_once_then_falls_back(self):
         ask = subtitle_provider.plan("Example", 2024, "Example.2024.1080p", ["en", "fr"], False, {})
         fallback = subtitle_provider.plan("Example", 2024, "Example.2024.1080p", ["en", "fr"], True, {})
@@ -575,6 +647,45 @@ class PolicyTests(unittest.TestCase):
             self.assertTrue(any("ZIP" in reason for reason in image_reasons))
             self.assertFalse(report["safe_to_continue"])
             self.assertEqual(len(report["hazards"]), 2)
+
+    def test_content_gate_salvages_verified_video_and_leaves_bad_companions(self):
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            movie_stage = base / "Movies" / ".incoming" / "Movies Nerd"
+            series_stage = base / "Series" / ".incoming" / "Movies Nerd"
+            source = movie_stage / "transfers" / ("a" * 40)
+            source.mkdir(parents=True)
+            video = source / "Example.mkv"
+            video.write_bytes(b"verified fixture")
+            (source / "bad.nfo").write_bytes(b"bad\x00data")
+
+            def fake_probe(path):
+                return {
+                    "schema": media_probe.SCHEMA,
+                    "media": str(path.resolve()),
+                    "snapshot": media_probe.snapshot(path),
+                    "ffprobe": {"streams": [], "format": {}},
+                    "summary": {
+                        "valid_media": True, "duration_seconds": 5400.0,
+                        "width": 1920, "height": 1080, "video_codec": "h264",
+                        "stream_count": 2, "chapter_count": 0,
+                    },
+                }
+
+            clean = movie_stage / "clean" / ("a" * 40)
+            with (
+                patch.object(select_payload, "probe_media", side_effect=fake_probe),
+                patch.object(select_payload, "staging_roots", return_value=(movie_stage, series_stage)),
+            ):
+                report = select_payload.scan_payload(source)
+                result = select_payload.extract_selected(source.resolve(), clean, report)
+            self.assertTrue(report["safe_to_extract_selected"])
+            self.assertFalse(report["safe_to_continue"])
+            self.assertTrue(report["cleanup_required"])
+            self.assertTrue((clean / "Example.mkv").is_file())
+            self.assertTrue((source / "bad.nfo").is_file())
+            self.assertFalse((source / "Example.mkv").exists())
+            self.assertTrue(result["verification"]["safe_to_continue"])
 
     def test_saved_media_probe_is_reused_for_subtitle_coverage(self):
         with tempfile.TemporaryDirectory() as raw:

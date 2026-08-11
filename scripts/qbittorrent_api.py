@@ -29,6 +29,11 @@ MAX_BYTES = 15 * GIB
 LOOPBACKS = {"127.0.0.1", "::1", "localhost"}
 EXTRA_RE = re.compile(r"(?:^|[\\/._ -])(sample|trailer|featurette|interview|deleted[ ._-]?scene|behind[ ._-]?the[ ._-]?scenes|bonus)(?:$|[\\/._ -])", re.I)
 CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+SKIP_ONLY_REASONS = {
+    "hidden payload path",
+    "dangerous or archive extension, including inner extension",
+    "unexpected extension",
+}
 
 
 class QbtError(RuntimeError):
@@ -275,21 +280,22 @@ def classify_files(files: list[dict], series: bool = False) -> dict:
             "unsafe_reasons": reasons,
         }
         normalized.append(record)
-        if reasons:
+        hard_reasons = [reason for reason in reasons if reason not in SKIP_ONLY_REASONS]
+        record["hard_reasons"] = hard_reasons
+        if hard_reasons:
             unsafe.append(record)
         if suffix in VIDEO_EXTENSIONS and not extra and not reasons:
             videos.append(record)
     main = max(videos, key=lambda item: item["size"], default=None)
-    keep = []
-    skip = []
-    for item in normalized:
-        suffix = PurePosixPath(item["name"]).suffix.lower()
-        if item["unsafe_reasons"] or item["extra"]:
-            skip.append(item["index"])
-        elif not series and suffix in VIDEO_EXTENSIONS and main and item["index"] != main["index"]:
-            skip.append(item["index"])
-        else:
-            keep.append(item["index"])
+    selected_videos = videos if series else ([main] if main else [])
+    keep = [item["index"] for item in selected_videos]
+    skip = [item["index"] for item in normalized if item["index"] not in keep]
+    discarded = [item for item in normalized if item["index"] in skip]
+    all_safe_video_indices = [
+        item["index"] for item in normalized
+        if PurePosixPath(item["name"]).suffix.lower() in VIDEO_EXTENSIONS
+        and not item["unsafe_reasons"]
+    ]
     selected_size = sum(item["size"] for item in normalized if item["index"] in keep)
     return {
         "files": normalized,
@@ -298,6 +304,8 @@ def classify_files(files: list[dict], series: bool = False) -> dict:
         "episodes": videos if series else [],
         "keep_indices": keep,
         "skip_indices": skip,
+        "all_safe_video_indices": all_safe_video_indices,
+        "discarded_by_default": discarded,
         "selected_size": selected_size,
     }
 
@@ -354,9 +362,14 @@ def command_add(client: QbtClient, args: argparse.Namespace) -> dict:
         stage.chmod(0o700)
     except OSError as exc:
         raise QbtError(f"cannot restrict staging permissions: {exc}") from exc
+    transfer = stage / "transfers" / torrent_hash
+    if transfer.is_symlink():
+        raise QbtError("transfer staging must not be a symlink")
+    transfer.mkdir(mode=0o700, parents=True, exist_ok=True)
+    transfer.chmod(0o700)
     fields = {
         "urls": args.magnet,
-        "savepath": str(stage),
+        "savepath": str(transfer),
         "tags": f"movies-nerd,{args.kind}",
         "paused": "true",
         "root_folder": "true",
@@ -369,7 +382,7 @@ def command_add(client: QbtClient, args: argparse.Namespace) -> dict:
     response = client.request("torrents/add", fields, multipart_body=True).decode("utf-8", "replace").strip()
     if response not in ("", "Ok."):
         raise QbtError(f"qBittorrent rejected the torrent: {response}")
-    return {"added_stopped": True, "hash": torrent_hash, "staging": str(stage), "next": "inspect metadata before start"}
+    return {"added_stopped": True, "hash": torrent_hash, "staging": str(transfer), "next": "inspect metadata before start"}
 
 
 def command_inspect(client: QbtClient, args: argparse.Namespace) -> dict:
@@ -393,6 +406,7 @@ def command_inspect(client: QbtClient, args: argparse.Namespace) -> dict:
         "main_feature": files["main_feature"],
         "episodes": files["episodes"],
         "skipped_by_default": files["skip_indices"],
+        "discarded_files": files["discarded_by_default"],
         "files": files["files"],
         "safe_to_start": True,
     }
@@ -447,15 +461,15 @@ def command_start(client: QbtClient, args: argparse.Namespace) -> dict:
     if not args.commit:
         raise QbtError("refusing to start content transfer without --commit")
     info, files = validate_torrent(client, torrent_hash, args.allow_oversize, series=args.series)
-    transfer_size = sum(item["size"] for item in files["files"]) if args.include_extras else files["selected_size"]
-    if transfer_size > MAX_BYTES and not args.allow_oversize:
-        raise QbtError(f"actual selected transfer is {format_gib(transfer_size)}, above the 15 GiB limit")
     if args.include_extras:
-        keep_indices = [item["index"] for item in files["files"]]
-        skip_indices = []
+        keep_indices = files["all_safe_video_indices"]
+        skip_indices = [item["index"] for item in files["files"] if item["index"] not in keep_indices]
     else:
         keep_indices = files["keep_indices"]
         skip_indices = files["skip_indices"]
+    transfer_size = sum(item["size"] for item in files["files"] if item["index"] in keep_indices)
+    if transfer_size > MAX_BYTES and not args.allow_oversize:
+        raise QbtError(f"actual selected transfer is {format_gib(transfer_size)}, above the 15 GiB limit")
     if keep_indices:
         client.request("torrents/filePrio", {"hash": torrent_hash, "id": "|".join(map(str, keep_indices)), "priority": "1"})
     if skip_indices:
