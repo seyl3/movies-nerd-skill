@@ -26,29 +26,31 @@ Use exactly two mandatory security gates. Do not add media hashes, checksum mani
 1. Add the magnet stopped into `.incoming/Movies Nerd` under the selected root. Create the staging directory with user-only permissions and reject a symlinked staging root.
 2. Fetch metadata only when needed, under the same download confirmation and the documented temporary 1 KiB/s content limit.
 3. Run `scripts/qbittorrent_api.py inspect` before `start --commit`. Start without another prompt only when the inspected release matches the confirmed title, quality, source, and size.
-4. Reject the entire torrent if any file is unsafe or unexpected. Never continue by merely deselecting the hazardous file.
+4. Select only the main movie video or valid episode videos. Set every companion, extra, sample, archive, executable, installer, script, disk image, and unrelated file to priority zero before transfer. Trusted subtitles, NFO, and artwork are acquired or generated separately.
 
 Gate 1 must reject:
 
-- Absolute paths, empty or `..` components, control characters, bidirectional text controls, deceptive trailing spaces or dots, hidden paths, platform-reserved names, and path-length abuse.
-- Executables, installers, scripts, shortcuts, disk images, archives, libraries, and dangerous extensions appearing anywhere in a multi-extension name such as `movie.exe.mkv`.
-- Unknown extensions, empty files, more than 5,000 payload files, no recognizable main media file, a selected payload above 15 GiB without exact approval, or a save path outside staging.
+- Absolute paths, empty or `..` components, control characters, bidirectional text controls, deceptive trailing spaces or dots, platform-reserved names, path-length abuse, and duplicate or colliding paths.
+- Dangerous inner extensions or spoofing on a selected media path, such as `movie.exe.mkv`.
+- Invalid metadata, more than 5,000 payload files, no recognizable main media file, a selected payload above 15 GiB without exact approval, or a save path outside staging.
+
+Hidden paths, unknown extensions, and dangerous standalone files are never selected. They are reported as discarded-by-default instead of downloaded.
 
 ### Gate 2 — content after transfer
 
 1. Stop the completed torrent so files cannot change during inspection.
 2. Run `scripts/select_payload.py` once over the staged payload.
-3. Continue only when it returns `safe_to_continue: true`. Leave every rejected payload isolated in staging.
+3. If only separate companions or platform sidecars are unwanted, rerun with a new job-specific `--clean-dir` and `--commit`. Continue only when `safe_to_extract_selected` is true and the cleaned media passes the fresh verification. Leave everything not selected isolated in the original transfer directory.
 
 Gate 2 must:
 
-- Reject every symlink and non-regular filesystem entry, including devices, sockets, and application bundles.
+- Reject every selected symlink and non-regular filesystem entry, including devices, sockets, and application bundles.
 - Re-run all filename and path checks from Gate 1.
-- Read only bounded headers and trailers. Reject PE, ELF, Mach-O, Java/class, OLE, ZIP, RAR, 7z, gzip, bzip2, xz, tar, ISO, DMG, Windows shortcut, AppleDouble, script-shebang, and active HTML signatures even when renamed with a media extension.
-- Verify JPEG, PNG, and WebP signatures; bound image and text-companion sizes; reject binary NUL bytes in text companions.
+- Read only bounded headers and trailers. Reject a selected file containing PE, ELF, Mach-O, Java/class, OLE, archive, disk-image, shortcut, AppleDouble, script-shebang, or active HTML signatures even when renamed with a media extension.
+- Classify separate release NFO, subtitles, images, AppleDouble files, and other companions as discardable; never import or trust them. Generate fresh sidecars from validated sources.
 - Detect a file changing during inspection and fail closed.
 - Require every claimed video to pass `ffprobe` with a real video stream, positive duration, dimensions, and codec metadata.
-- Select only the main feature or valid episodes. Skip extras by default, but still safety-scan them.
+- Select only the main feature or valid episodes. Skip extras and every release companion by default.
 
 ## Transfer and post-download boundaries
 
@@ -59,5 +61,6 @@ Gate 2 must:
 - Modify MKV headers only inside staging, only after a copy-on-write rollback clone succeeds, and verify the result against the saved probe. Otherwise leave the source unchanged and use the remux path.
 - Remux only inside staging with `ffmpeg -c copy`. Verify stream layout, codecs, duration, and chapters; preserve the source on any mismatch.
 - Write metadata atomically and move only verified output into the final library.
-- Keep cleanup narrow and recoverable. The bundled qBittorrent client must not expose a delete operation.
+- After successful import, recoverably move the exact completed job artifacts out of `.incoming` with `finish_staging.py`; verify that no job-specific staging entry remains. The bundled qBittorrent client must not expose a delete operation.
+- Keep failed selected media isolated. Do not reject an otherwise verified video merely because separate junk exists; clean-extract the video and rebuild its trusted sidecars instead.
 - A stalled-transfer replacement must come from a different source and requires fresh confirmation. Preserve the old entry and partial data.

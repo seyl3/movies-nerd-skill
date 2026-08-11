@@ -6,9 +6,9 @@ Movies Nerd is an opinionated, all-in-one Codex skill for nontechnical film fans
 
 - Picks an efficient 4K release up to 15 GiB, or a space-efficient 1080p fallback.
 - Searches concurrent no-key APIs first and opens EXT only when the fast path finds nothing usable.
-- Opens and uses local qBittorrent automatically, stays with the transfer through completion, replaces stalled downloads with approval, skips extras, and prefers MKV without needless conversion.
+- Opens and uses local qBittorrent automatically, downloads only the main movie or episodes, stays through completion, replaces stalled downloads with approval, and prefers MKV without needless conversion.
 - Creates clean movie/series folders with posters, NFO metadata, track labels, and English/French subtitles. It uses OpenSubtitles with `OPENSUBTITLES_API_KEY`, or Subtitle Cat without one.
-- Prepares metadata, artwork, subtitles, and recommendations while the transfer runs so finalization stays short.
+- Prepares fresh metadata, artwork, subtitles, and recommendations while the transfer runs, salvages verified video when separate release junk appears, and clears completed jobs from `.incoming`.
 - Suggests a similar film and another by the director, with verified Letterboxd and SensCritique links.
 
 ## Layout
@@ -25,7 +25,7 @@ Requires Python 3.11+, qBittorrent 5.x, and FFmpeg/ffprobe. Optional MKVToolNix 
 
 ## Safety
 
-This clean-room project runs no third-party scraper code. Downloads use private staging, a local-only qBittorrent connection, and two checks that reject dangerous files, archives, spoofed paths, symlinks, and invalid media. The client cannot delete torrents. Optional macOS sandboxing adds isolation; media hashes and checksum manifests are omitted. See [security policy](references/security-policy.md).
+This clean-room project runs no third-party scraper code. Downloads use private staging, a local-only qBittorrent connection, main-media-only selection, and two checks that reject deceptive or invalid video. Separate junk is discarded and trusted sidecars are rebuilt. Cleanup is narrow and recoverable; the client cannot delete torrents. See [security policy](references/security-policy.md).
 
 ## Use
 

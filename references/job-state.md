@@ -7,4 +7,4 @@ Create one job manifest with `scripts/job_manifest.py` immediately after resolvi
 - Resume from completed steps instead of rescanning the library, repeating a provider lookup, or asking the same question again.
 - Never store passwords, API keys, tokens, cookies, authorization headers, or browser data. The helper rejects credential-like fields, bounds content, writes atomically with user-only permissions, and redacts magnets and torrent hashes from ordinary output.
 - Treat a missing, malformed, symlinked, out-of-staging, or identity-mismatched manifest as invalid. Reconstruct safe state from authoritative local sources; do not trust or execute its contents.
-- Remove the staging job only after successful import or explicit user-approved cleanup. It is operational state, not library metadata, and must never be copied into the final movie or series folder.
+- After successful import, use `finish_staging.py --commit` to recoverably move the manifest and every exact completed-job artifact out of `.incoming`, then verify none remain. Operational state must never be copied into the final movie or series folder.
