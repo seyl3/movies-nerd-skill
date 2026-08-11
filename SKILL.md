@@ -21,6 +21,7 @@ Target this skill at film fans and collectors who are not expected to understand
 
 - Read [references/security-policy.md](references/security-policy.md) before any search or download.
 - Read [references/search.md](references/search.md) before searching for a release.
+- Read [references/job-state.md](references/job-state.md) when starting or resuming an acquisition.
 - Read [references/library-policy.md](references/library-policy.md) before ranking a release or changing either media library.
 - Read [references/finalization.md](references/finalization.md) immediately after a confirmed transfer starts.
 - Read [references/recommendations.md](references/recommendations.md) after successfully importing a movie.
@@ -37,7 +38,7 @@ Target this skill at film fans and collectors who are not expected to understand
 
 1. Ask the user to specify separate Movies and Series roots unless both were already established in the current task. If the user does not specify them, use `~/Documents/Movies` and `~/Documents/Series`. Set `MOVIES_NERD_MOVIES_ROOT` and `MOVIES_NERD_SERIES_ROOT` to absolute paths for every bundled-script invocation. Never infer a shared volume root.
 2. Inventory the destination library and available disk space. Do not download a title already present unless the user requests a replacement.
-3. Resolve the exact title, year, media type, and authoritative IDs before searching.
+3. Resolve the exact title, year, media type, and authoritative IDs before searching. Create one staging-only manifest with `scripts/job_manifest.py` and update it after each material transition. Resume completed work from this manifest rather than repeating it.
 4. Search read-only and API-first. Run `scripts/search_releases.py` with its five-second default budget; it queries no-key APIs concurrently and also uses configured qBittorrent/Torznab providers. Rank its combined results immediately. Follow [references/search.md](references/search.md).
 5. Use EXT only when the API helper reports that fallback is needed or every API candidate is unsuitable. Then run `scripts/probe_ext.py` and use the first reachable allowlisted host in the browser. Never bypass Cloudflare or a CAPTCHA.
 6. Normalize results to JSON and rank them with `scripts/rank_releases.py`, passing the authoritative runtime with `--runtime-min`. Show the recommended release compactly with resolution, codec, total size, seeders/leechers or total peers, source, and only decision-relevant warnings.
@@ -58,6 +59,7 @@ Target this skill at film fans and collectors who are not expected to understand
 
 - `scripts/probe_ext.py`: Probe the fixed EXT host allowlist and report reachability or Cloudflare challenges. It does not bypass protection.
 - `scripts/search_releases.py`: Query Knaben, APIBay, and enabled qBittorrent/Torznab sources concurrently, sanitize and deduplicate magnets, and signal when EXT fallback is actually needed.
+- `scripts/job_manifest.py`: Persist bounded, credential-free, atomic job state inside staging so interrupted acquisitions resume without repeated work.
 - `scripts/rank_releases.py`: Rank normalized JSON results using resolution, codec, peer health, the 15 GiB ceiling, authoritative runtime, and collection-informed GiB/hour efficiency targets.
 - `scripts/prepare_download.py`: Validate a magnet, size, free space, staging path, and installed client; dry-run unless `--execute` is explicitly supplied.
 - `scripts/qbittorrent_api.py`: Control an existing qBittorrent instance through its localhost Web API: status, stopped add, capped metadata fetch, inspection, safe start, and stop. It never deletes torrents.

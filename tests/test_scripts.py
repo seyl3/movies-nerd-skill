@@ -16,6 +16,7 @@ sys.path.insert(0, str(SCRIPTS))
 import _common
 import qbittorrent_api as qbt
 import clean_clutter
+import job_manifest
 import monitor_download
 import opensubtitles_api
 import payload_safety
@@ -122,6 +123,44 @@ class PolicyTests(unittest.TestCase):
         }
         with self.assertRaises(ValueError):
             _common.library_roots(env)
+
+    def test_job_manifest_is_private_atomic_and_resumable(self):
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            env = {
+                _common.MOVIES_ROOT_ENV: str(base / "Movies"),
+                _common.SERIES_ROOT_ENV: str(base / "Series"),
+            }
+            path = job_manifest.create_job(
+                "movie", "Example", 2024,
+                {"release": {"magnet": "magnet:?xt=urn:btih:" + "a" * 40}},
+                env,
+            )
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            updated = job_manifest.update_job(
+                path,
+                {"state": "downloading", "steps": {"search": "complete", "transfer": "running"}},
+                env,
+            )
+            self.assertEqual(updated["state"], "downloading")
+            self.assertEqual(updated["steps"]["confirmation"], "pending")
+            _, loaded = job_manifest.load_job(path, env)
+            self.assertEqual(loaded["steps"]["search"], "complete")
+            self.assertEqual(job_manifest.redacted(loaded)["release"]["magnet"], "<stored>")
+
+    def test_job_manifest_rejects_credentials_and_outside_paths(self):
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            env = {
+                _common.MOVIES_ROOT_ENV: str(base / "Movies"),
+                _common.SERIES_ROOT_ENV: str(base / "Series"),
+            }
+            with self.assertRaises(job_manifest.ManifestError):
+                job_manifest.create_job("movie", "Example", 2024, {"api_key": "secret"}, env)
+            outside = base / "outside.json"
+            outside.write_text("{}", encoding="utf-8")
+            with self.assertRaises(job_manifest.ManifestError):
+                job_manifest.load_job(outside, env)
 
     def test_rank_prefers_eligible_4k_then_1080p(self):
         candidates = [

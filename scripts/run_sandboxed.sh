@@ -25,6 +25,7 @@ case "$ACTION" in
   qbt) MODE=qbt; SCRIPT=qbittorrent_api.py ;;
   monitor-download) MODE=qbt; SCRIPT=monitor_download.py ;;
   prepare-download) MODE=qbt; SCRIPT=prepare_download.py ;;
+  job-manifest) MODE=staging; SCRIPT=job_manifest.py ;;
   remux-mkv) MODE=staging; SCRIPT=remux_mkv.py ;;
   *) echo "unknown sandbox action: $ACTION" >&2; exit 64 ;;
 esac

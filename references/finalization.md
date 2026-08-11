@@ -21,7 +21,7 @@ Keep every prepared artifact in the matching hidden staging root. Do not inspect
 4. If the container or track metadata needs correction, use one verified `ffmpeg -c copy` remux. Never re-encode solely for naming or container preference.
 5. Validate the already-prepared subtitles, images, and XML, then atomically install the media and sidecars. Do not fetch the same metadata or artwork twice.
 
-Do not rescan the entire library during finalization. Cache exact-title metadata, artwork URLs, subtitle candidates, probes, and recommendation lookups for the current task. Invalidate a cached result only when the confirmed release, authoritative ID, or destination changes.
+Do not rescan the entire library during finalization. Persist exact-title metadata, artwork URLs, subtitle candidates, probes, and recommendation lookups in the staging job manifest. Invalidate a cached result only when the confirmed release, authoritative ID, or destination changes.
 
 ## Time budget and user experience
 
