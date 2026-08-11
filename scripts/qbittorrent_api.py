@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import errno
 import http.cookiejar
 import json
 import os
@@ -42,6 +43,26 @@ class QbtError(RuntimeError):
 
 class QbtUnavailable(QbtError):
     """The local qBittorrent application cannot currently be reached."""
+
+
+class QbtAccessDenied(QbtError):
+    """The host must grant this process local-app access before retrying."""
+
+
+def access_denied(exc: BaseException) -> bool:
+    """Recognize host sandbox denials without misreporting qBittorrent as closed."""
+    current: object = exc
+    for _ in range(5):
+        if isinstance(current, PermissionError) or getattr(current, "errno", None) in {
+            errno.EACCES,
+            errno.EPERM,
+        }:
+            return True
+        next_reason = getattr(current, "reason", None)
+        if next_reason is None or next_reason is current:
+            break
+        current = next_reason
+    return False
 
 
 def checked_base_url(raw: str) -> str:
@@ -129,7 +150,11 @@ class QbtClient:
             if exc.code == 403:
                 raise QbtError("qBittorrent needs its one-time Movies Nerd setup") from exc
             raise QbtError("qBittorrent couldn't complete the request. Please try again.") from exc
-        except (URLError, TimeoutError) as exc:
+        except (URLError, TimeoutError, PermissionError) as exc:
+            if access_denied(exc):
+                raise QbtAccessDenied(
+                    "local qBittorrent access needs host approval; retry this command with local-app permission"
+                ) from exc
             raise QbtUnavailable("qBittorrent app isn't ready") from exc
 
     def json(self, endpoint: str) -> object:
@@ -492,6 +517,52 @@ def command_stop(client: QbtClient, args: argparse.Namespace) -> dict:
     return {"stopped": True, "hash": torrent_hash}
 
 
+def checked_movies_nerd_transfer(info: dict, torrent_hash: str) -> Path:
+    tags = {value.strip().casefold() for value in str(info.get("tags") or "").split(",")}
+    if "movies-nerd" not in tags:
+        raise QbtError("refusing to remove a torrent not owned by Movies Nerd")
+    actual = Path(str(info.get("save_path") or "")).resolve(strict=False)
+    expected = [
+        root.resolve(strict=False) / "transfers" / torrent_hash
+        for root in staging_roots()
+    ]
+    if actual not in expected:
+        raise QbtError("refusing to remove a torrent outside its exact Movies Nerd staging directory")
+    return actual
+
+
+def remove_movies_nerd_torrent(client: QbtClient, torrent_hash: str) -> dict:
+    """Remove one exact Movies Nerd torrent and its dedicated staged payload."""
+    normalized = normalize_hash(torrent_hash)
+    info = torrent_info(client, normalized)
+    transfer = checked_movies_nerd_transfer(info, normalized)
+    client.request("torrents/stop", {"hashes": normalized})
+    client.request("torrents/delete", {"hashes": normalized, "deleteFiles": "true"})
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            torrent_info(client, normalized)
+        except QbtError as exc:
+            if "not present" in str(exc):
+                break
+            raise
+        time.sleep(0.1)
+    try:
+        transfer.rmdir()
+    except (FileNotFoundError, OSError):
+        pass
+    sidecar = transfer.with_name("._" + transfer.name)
+    if sidecar.is_file() and not sidecar.is_symlink():
+        sidecar.unlink(missing_ok=True)
+    return {"removed": True, "hash": normalized, "staged_payload_removed": not transfer.exists()}
+
+
+def command_remove(client: QbtClient, args: argparse.Namespace) -> dict:
+    if not args.commit:
+        raise QbtError("refusing to remove a torrent without --commit")
+    return remove_movies_nerd_torrent(client, args.hash)
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     sub = result.add_subparsers(dest="command", required=True)
@@ -519,6 +590,9 @@ def parser() -> argparse.ArgumentParser:
     stop = sub.add_parser("stop", help="stop one torrent")
     stop.add_argument("--hash", required=True)
     stop.add_argument("--commit", action="store_true")
+    remove = sub.add_parser("remove", help="remove one exact Movies Nerd torrent and staged payload")
+    remove.add_argument("--hash", required=True)
+    remove.add_argument("--commit", action="store_true")
     return result
 
 
@@ -533,9 +607,17 @@ def main() -> int:
             "fetch-metadata": command_fetch_metadata,
             "start": command_start,
             "stop": command_stop,
+            "remove": command_remove,
         }
         print(json.dumps(handlers[args.command](client, args), indent=2, sort_keys=True))
         return 0
+    except QbtAccessDenied as exc:
+        print(json.dumps({
+            "error": str(exc),
+            "needs_local_app_access": True,
+            "user_action_required": False,
+        }, indent=2), file=sys.stderr)
+        return 6
     except (QbtError, ValueError) as exc:
         print(json.dumps({"error": str(exc)}, indent=2), file=sys.stderr)
         return 2

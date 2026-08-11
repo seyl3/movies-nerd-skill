@@ -4,13 +4,13 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
 from pathlib import Path
 import platform
 import shutil
 import socket
-import subprocess
 import sys
 from urllib.parse import urlparse
 
@@ -20,23 +20,6 @@ from _common import library_configuration, library_roots
 def command(name: str) -> dict:
     path = shutil.which(name)
     return {"available": path is not None, "path": path}
-
-
-def sandbox_status() -> dict:
-    result = command("sandbox-exec")
-    result["usable"] = False
-    if result["available"]:
-        completed = subprocess.run(
-            [result["path"], "-p", "(version 1) (allow default)", "/usr/bin/true"],
-            check=False,
-            text=True,
-            capture_output=True,
-            timeout=5,
-        )
-        result["usable"] = completed.returncode == 0
-        if not result["usable"]:
-            result["note"] = (completed.stderr or completed.stdout).strip()[:300]
-    return result
 
 
 def root_status(path: Path) -> dict:
@@ -69,6 +52,10 @@ def qbt_endpoint(technical: bool = False) -> dict:
             result["status"] = "ready"
             result["message"] = "qBittorrent is ready"
     except OSError as exc:
+        if getattr(exc, "errno", None) in {errno.EACCES, errno.EPERM}:
+            result["status"] = "needs-local-app-access"
+            result["message"] = "qBittorrent check needs local-app access"
+            result["retry_with_local_app_access"] = True
         if technical:
             result["error"] = str(exc)
     if technical:
@@ -91,7 +78,6 @@ def main() -> int:
         "library_configuration": library_configuration(),
         "libraries": {"movies": root_status(movies_root), "series": root_status(series_root)},
     }
-    report["commands"]["sandbox-exec"] = sandbox_status()
     required_ok = (
         report["python"]["supported"]
         and report["commands"]["ffmpeg"]["available"]
