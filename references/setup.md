@@ -11,15 +11,13 @@ This is a one-time technical reference for installation or troubleshooting. Do n
 3. FFmpeg and ffprobe for media inspection and lossless container remuxing.
 4. Git only when developing or updating the skill repository.
 
-Optional on macOS: `/usr/bin/sandbox-exec`. The launcher uses it as defense in depth when present. It is deprecated by Apple and is not a complete security boundary.
-
 Optional: MKVToolNix provides `mkvpropedit`, which can normalize track headers in seconds without a complete remux. Movies Nerd uses it only when available and when the staging filesystem supports a copy-on-write rollback clone; FFmpeg remains the dependency-free fallback path.
 
 No Node.js, npm packages, Docker image, browser extension, cloned scraper server, or Python package is required.
 
 ## Configure fast search
 
-No search key or account is required. `scripts/search_releases.py` queries the Knaben and APIBay HTTPS JSON APIs concurrently, then falls back to EXT only when necessary. It uses the operating system's `curl` command only if Python's TLS trust store is broken; current macOS, Windows, and common Linux installations normally include it.
+No search key or account is required. `scripts/search_releases.py` queries the Knaben, APIBay, Magnetz, and YTS HTTPS JSON APIs concurrently, then falls back to EXT only when necessary. It uses the operating system's `curl` command only if Python's TLS trust store is broken; current macOS, Windows, and common Linux installations normally include it.
 
 For broader coverage, optionally configure Jackett and add its Torznab feeds to qBittorrent's search engine. qBittorrent recommends Jackett, but Movies Nerd never installs it automatically. Keep Jackett on `127.0.0.1`, configure only the indexers you trust, and store its generated API key in qBittorrent rather than this repository.
 
@@ -69,7 +67,7 @@ sudo apt install mkvtoolnix
 
 ### Windows
 
-Install current releases from the official Python, FFmpeg, Git, and qBittorrent sites. Add Python and FFmpeg to `PATH`. The macOS sandbox launcher is unavailable, but the Python safety checks still apply.
+Install current releases from the official Python, FFmpeg, Git, and qBittorrent sites. Add Python and FFmpeg to `PATH`.
 
 ## Configure qBittorrent safely
 
@@ -107,9 +105,8 @@ From the installed skill directory, run:
 
 ```sh
 python3 scripts/check_environment.py
-scripts/run_sandboxed.sh check-environment
 python3 scripts/qbittorrent_api.py status
 python3 scripts/subtitle_provider.py --title 'Example' --year 2024
 ```
 
-The checker is read-only. A failed qBittorrent status usually means the application is closed, the Web UI is disabled, the port differs, or the environment credentials are missing.
+The checker is read-only. Normal acquisition opens qBittorrent automatically. A `needs-local-app-access` status means the execution host must approve the local-app command; retry it through that host mechanism instead of telling the user the app is closed.

@@ -7,8 +7,8 @@ Every new task identifies itself once as `Movies Nerd vX.Y.Z`, so users always k
 ## Features
 
 - Picks an efficient 4K release up to 15 GiB, or a space-efficient 1080p fallback.
-- Searches concurrent no-key APIs first and opens EXT only when the fast path finds nothing usable.
-- Opens and uses local qBittorrent automatically, downloads only the main movie or episodes, stays through completion, replaces stalled downloads with approval, and prefers MKV without needless conversion.
+- Searches Knaben, APIBay, Magnetz, and YTS concurrently through no-key JSON APIs, and opens EXT only when the API path finds nothing usable.
+- Opens qBittorrent automatically, privately races up to three same-quality candidates, keeps one healthy winner, clears losers and failed jobs, stays through completion, and prefers MKV without needless conversion.
 - Creates clean movie/series folders with posters, NFO metadata, track labels, and English/French subtitles. It uses OpenSubtitles with `OPENSUBTITLES_API_KEY`, or Subtitle Cat without one.
 - Prepares fresh metadata, artwork, subtitles, and recommendations while the transfer runs, salvages verified video when separate release junk appears, and clears completed jobs from `.incoming`.
 - Suggests a similar film and another by the director, with verified Letterboxd and SensCritique links.
@@ -27,7 +27,7 @@ Requires Python 3.11+, qBittorrent 5.x, and FFmpeg/ffprobe. Optional MKVToolNix 
 
 ## Safety
 
-This clean-room project runs no third-party scraper code. Downloads use private staging, a local-only qBittorrent connection, main-media-only selection, and two checks that reject deceptive or invalid video. Separate junk is discarded and trusted sidecars are rebuilt. Cleanup is narrow and recoverable; the client cannot delete torrents. See [security policy](references/security-policy.md).
+This clean-room project runs no third-party scraper code. Downloads use private staging, a local-only qBittorrent connection, main-media-only selection, and two checks that reject deceptive or invalid video. Cleanup can remove only exact Movies Nerd-tagged transfers in dedicated staging folders. See [security policy](references/security-policy.md).
 
 ## Use
 
