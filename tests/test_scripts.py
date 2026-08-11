@@ -165,6 +165,40 @@ class PolicyTests(unittest.TestCase):
             with self.assertRaises(job_manifest.ManifestError):
                 job_manifest.load_job(outside, env)
 
+    def test_job_manifest_records_primary_and_backup_search_results(self):
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            env = {
+                _common.MOVIES_ROOT_ENV: str(base / "Movies"),
+                _common.SERIES_ROOT_ENV: str(base / "Series"),
+            }
+            job = job_manifest.create_job("movie", "Example", 2024, environ=env)
+            primary = {
+                "title": "Example 2024 1080p x265", "source": "1337x",
+                "provider": "Knaben API", "size_bytes": 2_000_000_000,
+                "size": "1.86 GiB", "resolution": "1080p", "seeders": 30,
+                "leechers": 2, "score": 350, "warnings": [],
+                "magnet": search_releases.minimal_magnet("a" * 40, "Primary"),
+            }
+            backup = {
+                **primary,
+                "source": "The Pirate Bay",
+                "provider": "APIBay",
+                "magnet": search_releases.minimal_magnet("b" * 40, "Backup"),
+            }
+            result = base / "search.json"
+            result.write_text(json.dumps({
+                "query": "Example 2024",
+                "request": {"title": "Example", "year": 2024, "kind": "movie"},
+                "elapsed_ms": 800,
+                "usable_results": 2,
+                "selection": {"primary": primary, "backup": backup, "eligible_count": 2},
+            }), encoding="utf-8")
+            recorded = job_manifest.record_search(job, result, env)
+            self.assertEqual(recorded["steps"]["search"], "complete")
+            self.assertEqual(recorded["backup_release"]["source"], "The Pirate Bay")
+            self.assertEqual(job_manifest.redacted(recorded)["backup_release"]["magnet"], "<stored>")
+
     def test_rank_prefers_eligible_4k_then_1080p(self):
         candidates = [
             {"title": "Film 1080p x264", "size": "7 GiB", "seeders": 100},
@@ -243,6 +277,7 @@ class PolicyTests(unittest.TestCase):
                 "title": f"Example 2024 1080p x265 release {index}",
                 "size": 2_000_000_000,
                 "seeders": 20,
+                "source": f"source-{index}",
                 "magnet": search_releases.minimal_magnet(str(index) * 40, "Example"),
             }
             for index in range(1, 4)
@@ -259,7 +294,10 @@ class PolicyTests(unittest.TestCase):
             )
         self.assertEqual(len(results), 3)
         self.assertTrue(early)
-        self.assertEqual(reports["qbt_torznab"]["skipped"], "enough exact healthy API results")
+        self.assertEqual(
+            reports["qbt_torznab"]["skipped"],
+            "enough exact healthy API results with a different-source backup",
+        )
         qbt_search.assert_not_called()
 
     def test_qbittorrent_search_runs_when_fast_results_are_insufficient(self):
@@ -281,6 +319,46 @@ class PolicyTests(unittest.TestCase):
             )
         self.assertFalse(early)
         qbt_search.assert_called_once()
+
+    def test_search_prepares_backup_from_a_different_source(self):
+        candidates = [
+            {
+                "title": "Example 2024 2160p HEVC",
+                "size": 10_000_000_000,
+                "seeders": 30,
+                "source": "1337x",
+                "provider": "Knaben API",
+                "magnet": search_releases.minimal_magnet("a" * 40, "Primary"),
+            },
+            {
+                "title": "Example 2024 2160p HEVC alternate",
+                "size": 11_000_000_000,
+                "seeders": 20,
+                "source": "1337x",
+                "provider": "Knaben API",
+                "magnet": search_releases.minimal_magnet("b" * 40, "Same source"),
+            },
+            {
+                "title": "Example 2024 1080p x265",
+                "size": 2_500_000_000,
+                "seeders": 15,
+                "source": "The Pirate Bay",
+                "provider": "APIBay",
+                "magnet": search_releases.minimal_magnet("c" * 40, "Backup"),
+            },
+        ]
+        selection = search_releases.release_selection(
+            candidates, "Example", 2024, 15 * qbt.GIB, 90,
+        )
+        self.assertEqual(
+            {selection["primary"]["source"], selection["backup"]["source"]},
+            {"1337x", "The Pirate Bay"},
+        )
+        self.assertNotEqual(selection["primary"]["source"], selection["backup"]["source"])
+        self.assertNotEqual(
+            search_releases.magnet_hash(selection["primary"]["magnet"]),
+            search_releases.magnet_hash(selection["backup"]["magnet"]),
+        )
 
     def test_nfo_escapes_untrusted_text(self):
         payload = write_nfo.render("movie", {"title": "A & B <C>", "year": 2024})
@@ -351,6 +429,19 @@ class PolicyTests(unittest.TestCase):
             monitor_download.next_poll_interval({"download_speed": 1, "state": "downloading"}, 60),
             60,
         )
+
+    def test_monitor_surfaces_prepared_backup_without_magnet(self):
+        candidate = monitor_download.backup_candidate({
+            "backup_release": {
+                "title": "Example 2024 1080p x265",
+                "source": "The Pirate Bay",
+                "size": "2.20 GiB",
+                "seeders": 25,
+                "magnet": "magnet:?xt=urn:btih:" + "a" * 40,
+            },
+        }, "1337x")
+        self.assertEqual(candidate["source"], "The Pirate Bay")
+        self.assertNotIn("magnet", candidate)
 
     def test_clutter_finder_detects_portuguese_and_apple_files(self):
         with tempfile.TemporaryDirectory() as raw:

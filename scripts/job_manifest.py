@@ -13,8 +13,10 @@ import re
 import stat
 import sys
 import uuid
+from urllib.parse import quote
 
 from _common import staging_roots
+from qbittorrent_api import QbtError, magnet_hash
 
 MAX_MANIFEST_BYTES = 256 * 1024
 MAX_DEPTH = 8
@@ -74,9 +76,9 @@ def validate_tree(value: object, depth: int = 0) -> None:
     raise ManifestError(f"unsupported manifest value: {type(value).__name__}")
 
 
-def read_json(path: str | Path) -> dict:
+def read_json(path: str | Path, max_bytes: int = MAX_MANIFEST_BYTES) -> dict:
     if str(path) == "-":
-        raw = sys.stdin.buffer.read(MAX_MANIFEST_BYTES + 1)
+        raw = sys.stdin.buffer.read(max_bytes + 1)
     else:
         source = Path(path)
         if source.is_symlink() or not source.is_file():
@@ -86,9 +88,9 @@ def read_json(path: str | Path) -> dict:
         with os.fdopen(descriptor, "rb") as handle:
             if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
                 raise ManifestError("JSON input must be a regular file")
-            raw = handle.read(MAX_MANIFEST_BYTES + 1)
-    if len(raw) > MAX_MANIFEST_BYTES:
-        raise ManifestError("JSON input exceeds 256 KiB")
+            raw = handle.read(max_bytes + 1)
+    if len(raw) > max_bytes:
+        raise ManifestError(f"JSON input exceeds {max_bytes // 1024} KiB")
     try:
         value = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -252,14 +254,91 @@ def update_job(
     return updated
 
 
+def checked_release(value: object) -> dict:
+    if not isinstance(value, dict):
+        raise ManifestError("search selection is missing a release")
+    fields = {
+        key: deepcopy(value.get(key))
+        for key in (
+            "title", "source", "provider", "size_bytes", "size", "resolution",
+            "seeders", "leechers", "score", "warnings", "magnet",
+        )
+    }
+    if not str(fields["title"] or "").strip() or not str(fields["source"] or "").strip():
+        raise ManifestError("search selection has an invalid title or source")
+    try:
+        size = int(fields["size_bytes"])
+        seeders = int(fields["seeders"])
+    except (TypeError, ValueError) as exc:
+        raise ManifestError("search selection has invalid size or peer data") from exc
+    if size <= 0 or size > 100 * 1024 ** 3 or seeders <= 0:
+        raise ManifestError("search selection is outside safety bounds")
+    fields["size_bytes"] = size
+    fields["seeders"] = seeders
+    try:
+        info_hash = magnet_hash(str(fields["magnet"] or ""))
+    except (QbtError, ValueError) as exc:
+        raise ManifestError("search selection has an invalid magnet") from exc
+    fields["magnet"] = (
+        f"magnet:?xt=urn:btih:{info_hash}&dn="
+        f"{quote(str(fields['title'])[:300], safe='')}"
+    )
+    validate_tree(fields)
+    return fields
+
+
+def record_search(
+    job: str | Path, search_result: str | Path,
+    environ: dict[str, str] | None = None,
+) -> dict:
+    _, current = load_job(job, environ)
+    result = read_json(search_result, 5 * 1024 * 1024)
+    request = result.get("request")
+    selection = result.get("selection")
+    if not isinstance(request, dict) or not isinstance(selection, dict):
+        raise ManifestError("search result lacks request or selection data")
+    identity = current["identity"]
+    if (
+        str(request.get("title") or "").strip().casefold() != str(identity["title"]).casefold()
+        or request.get("year") != identity["year"]
+        or request.get("kind") != current["kind"]
+    ):
+        raise ManifestError("search result identity does not match the job")
+    primary = checked_release(selection.get("primary"))
+    raw_backup = selection.get("backup")
+    backup = checked_release(raw_backup) if raw_backup is not None else None
+    if backup:
+        if magnet_hash(primary["magnet"]) == magnet_hash(backup["magnet"]):
+            raise ManifestError("backup release duplicates the primary release")
+        if str(primary["source"]).strip().casefold() == str(backup["source"]).strip().casefold():
+            raise ManifestError("backup release must use a different source")
+    patch = {
+        "release": primary,
+        "backup_release": backup,
+        "steps": {"search": "complete"},
+        "cache": {
+            "search_summary": {
+                "query": result.get("query"),
+                "elapsed_ms": result.get("elapsed_ms"),
+                "usable_results": result.get("usable_results"),
+            },
+        },
+    }
+    return update_job(job, patch, environ)
+
+
 def redacted(value: dict) -> dict:
-    output = deepcopy(value)
-    release = output.get("release")
-    if isinstance(release, dict):
-        for key in ("magnet", "torrent_hash"):
-            if release.get(key):
-                release[key] = "<stored>"
-    return output
+    def visit(item: object) -> object:
+        if isinstance(item, dict):
+            return {
+                key: "<stored>" if key.casefold() in {"magnet", "torrent_hash"} and child else visit(child)
+                for key, child in item.items()
+            }
+        if isinstance(item, list):
+            return [visit(child) for child in item]
+        return deepcopy(item)
+
+    return visit(value)
 
 
 def main() -> int:
@@ -273,6 +352,9 @@ def main() -> int:
     update = subparsers.add_parser("update")
     update.add_argument("job")
     update.add_argument("--input", required=True, help="JSON merge object; use - for stdin")
+    record = subparsers.add_parser("record-search")
+    record.add_argument("job")
+    record.add_argument("search_result")
     show = subparsers.add_parser("show")
     show.add_argument("job")
     show.add_argument("--raw", action="store_true")
@@ -287,6 +369,9 @@ def main() -> int:
             print(json.dumps({"job": str(path), "manifest": redacted(value)}, ensure_ascii=False, indent=2))
         elif args.command == "update":
             value = update_job(args.job, read_json(args.input))
+            print(json.dumps({"job": str(Path(args.job)), "manifest": redacted(value)}, ensure_ascii=False, indent=2))
+        elif args.command == "record-search":
+            value = record_search(args.job, args.search_result)
             print(json.dumps({"job": str(Path(args.job)), "manifest": redacted(value)}, ensure_ascii=False, indent=2))
         else:
             _, value = load_job(args.job)

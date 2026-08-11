@@ -344,6 +344,54 @@ def usable_count(
     return usable
 
 
+def source_key(value: object) -> str:
+    text = str(value or "unknown").strip().casefold()
+    host = urlparse(text).hostname if "://" in text else None
+    normalized = host or text
+    if "pirate bay" in normalized or "thepiratebay" in normalized or normalized == "apibay":
+        return "the-pirate-bay"
+    return normalized
+
+
+def release_selection(
+    results: list[dict], title: str, year: int | None, max_bytes: int,
+    runtime_minutes: float | None,
+) -> dict:
+    candidates = []
+    for item in results:
+        ranked = normalize(item, max_bytes, runtime_minutes)
+        if not (
+            matches_requested_title(item.get("title"), title, year)
+            and ranked["eligible"]
+            and ranked["magnet"]
+            and ranked["seeders"] > 0
+        ):
+            continue
+        candidates.append({
+            "title": ranked["title"],
+            "source": ranked["source"],
+            "provider": item.get("provider"),
+            "size_bytes": ranked["size_bytes"],
+            "size": ranked["size"],
+            "resolution": ranked["resolution"],
+            "seeders": ranked["seeders"],
+            "leechers": safe_int(item.get("leechers")),
+            "score": ranked["score"],
+            "warnings": ranked["warnings"],
+            "magnet": ranked["magnet"],
+        })
+    candidates.sort(key=lambda item: (item["score"], item["seeders"]), reverse=True)
+    primary = candidates[0] if candidates else None
+    backup = None
+    if primary:
+        primary_source = source_key(primary.get("source"))
+        backup = next(
+            (item for item in candidates[1:] if source_key(item.get("source")) != primary_source),
+            None,
+        )
+    return {"primary": primary, "backup": backup, "eligible_count": len(candidates)}
+
+
 def run_providers(providers: dict[str, object]) -> tuple[list[dict], dict]:
     reports: dict[str, dict] = {}
     combined: list[dict] = []
@@ -372,7 +420,11 @@ def search_all(
         "apibay": lambda: search_apibay(query, fast_timeout),
     })
     combined = deduplicate(combined)
-    early_success = usable_count(combined, title, year, max_bytes, runtime_minutes) >= minimum_usable
+    fast_selection = release_selection(combined, title, year, max_bytes, runtime_minutes)
+    early_success = (
+        fast_selection["eligible_count"] >= minimum_usable
+        and fast_selection["backup"] is not None
+    )
     if use_qbt and not early_success:
         remaining = max(0.5, timeout - (time.monotonic() - started))
         qbt_items, qbt_report = run_providers({
@@ -382,7 +434,9 @@ def search_all(
         reports.update(qbt_report)
     elif use_qbt:
         reports["qbt_torznab"] = {
-            "ok": True, "results": 0, "skipped": "enough exact healthy API results",
+            "ok": True,
+            "results": 0,
+            "skipped": "enough exact healthy API results with a different-source backup",
         }
     return combined, reports, early_success
 
@@ -409,14 +463,21 @@ def main() -> int:
         title=args.title, year=args.year, max_bytes=max_bytes,
         runtime_minutes=args.runtime_min,
     )
-    usable = usable_count(results, args.title, args.year, max_bytes, args.runtime_min)
+    selection = release_selection(results, args.title, args.year, max_bytes, args.runtime_min)
+    usable = selection["eligible_count"]
     output = {
         "query": query,
+        "request": {
+            "title": args.title,
+            "year": args.year,
+            "kind": "series" if args.series else "movie",
+        },
         "elapsed_ms": round((time.monotonic() - started) * 1000),
         "providers": providers,
         "results": results,
         "usable_results": usable,
         "early_success": early_success,
+        "selection": selection,
         "fallback": {"needed": usable == 0, "next": "ext-browser" if usable == 0 else None},
     }
     json.dump(output, sys.stdout, ensure_ascii=False, indent=2)

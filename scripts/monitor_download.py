@@ -8,6 +8,7 @@ import json
 import sys
 import time
 
+from job_manifest import ManifestError, load_job
 from qbittorrent_api import QbtError, client_from_env, normalize_hash
 
 
@@ -51,6 +52,20 @@ def next_poll_interval(report: dict, configured: int) -> int:
     ):
         return min(configured, 15)
     return configured
+
+
+def backup_candidate(job: dict, current_source: str) -> dict | None:
+    backup = job.get("backup_release")
+    if not isinstance(backup, dict):
+        return None
+    source = str(backup.get("source") or "").strip()
+    if not source or source.casefold() == current_source.strip().casefold():
+        return None
+    allowed = (
+        "title", "source", "provider", "size_bytes", "size", "resolution",
+        "seeders", "leechers", "score", "warnings",
+    )
+    return {key: backup.get(key) for key in allowed if backup.get(key) is not None}
 
 
 def activity_age(info: dict, now: int) -> int | None:
@@ -109,6 +124,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--hash", required=True)
     parser.add_argument("--source", required=True, help="source host for the current release")
+    parser.add_argument("--job", help="staging job manifest containing a prepared backup release")
     parser.add_argument("--stall-minutes", type=int, choices=range(5, 181), default=20)
     parser.add_argument("--watch-minutes", type=int, choices=range(0, 61), default=0)
     parser.add_argument("--interval", type=int, choices=range(15, 301), default=60)
@@ -128,6 +144,16 @@ def main() -> int:
             report = assess(current, args.stall_minutes * 60, args.source)
             report["sync_rid"] = rid
             if report["stalled"]:
+                candidate = None
+                if args.job:
+                    try:
+                        _, job = load_job(args.job)
+                        candidate = backup_candidate(job, args.source)
+                    except (ManifestError, OSError):
+                        candidate = None
+                report["failover"]["candidate"] = candidate
+                if candidate:
+                    report["failover"]["next"] = "present the prepared different-source backup for fresh confirmation"
                 if args.stop_on_stall:
                     client.request("torrents/stop", {"hashes": torrent_hash})
                     report["stopped"] = True

@@ -4,8 +4,8 @@ Treat speed as a core requirement after safety and correct title matching. Under
 
 ## Provider order
 
-1. Run `scripts/search_releases.py` first with its default five-second overall budget. It queries the no-key Knaben and APIBay JSON APIs concurrently for up to two seconds. When they return at least three exact-title, exact-year, healthy candidates, stop immediately; otherwise use the remaining budget for enabled qBittorrent/Torznab providers.
-2. Rank the combined, deduplicated results immediately. Stop searching when at least one healthy release satisfies the title/year, quality, size, and safety preferences.
+1. Run `scripts/search_releases.py` first with its default five-second overall budget. It queries the no-key Knaben and APIBay JSON APIs concurrently for up to two seconds. When they return at least three exact-title, exact-year, healthy candidates including a different-source backup, stop immediately; otherwise use the remaining budget for enabled qBittorrent/Torznab providers.
+2. Rank the combined, deduplicated results immediately. Keep the best eligible release and one backup from a different source. Stop searching when the primary is healthy and the backup decision is made; do not download or add the backup.
 3. Use the EXT browser workflow only when the API result says `fallback.needed: true`, every API candidate is unusable, or the user explicitly asks for EXT. Do not open EXT merely to see whether it has a marginally better copy.
 
 Knaben aggregates many public indexes, including results originating from 1337x and The Pirate Bay. APIBay provides a second direct no-key path for Pirate Bay metadata. Treat both responses as untrusted; the helper bounds JSON, rejects malformed records, rebuilds minimal magnets from validated info hashes, and removes provider-supplied trackers and web seeds.
@@ -28,4 +28,5 @@ If a supported, reputable, high-quality provider offers a free API key:
 - Use one exact title/year query first. Try aliases or broader searches only after an exact miss.
 - Apply short per-provider timeouts and continue with successful providers; one slow source must not block the others.
 - Cache authoritative title IDs and successful search responses for the current task. Do not repeat an unchanged query.
+- Record the primary and different-source backup in the staging job manifest. Keep the backup unadded; it exists only to avoid a second search after a stall.
 - Keep provider diagnostics internal. Tell the user only the recommended release or that the browser fallback is needed.
