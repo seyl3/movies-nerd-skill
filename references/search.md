@@ -4,7 +4,7 @@ Treat speed as a core requirement after safety and correct title matching. Under
 
 ## Provider order
 
-1. Run `scripts/search_releases.py` first with its default five-second provider budget. It queries the no-key Knaben and APIBay JSON APIs concurrently and also uses enabled qBittorrent/Torznab providers when available.
+1. Run `scripts/search_releases.py` first with its default five-second overall budget. It queries the no-key Knaben and APIBay JSON APIs concurrently for up to two seconds. When they return at least three exact-title, exact-year, healthy candidates, stop immediately; otherwise use the remaining budget for enabled qBittorrent/Torznab providers.
 2. Rank the combined, deduplicated results immediately. Stop searching when at least one healthy release satisfies the title/year, quality, size, and safety preferences.
 3. Use the EXT browser workflow only when the API result says `fallback.needed: true`, every API candidate is unusable, or the user explicitly asks for EXT. Do not open EXT merely to see whether it has a marginally better copy.
 
@@ -24,6 +24,7 @@ If a supported, reputable, high-quality provider offers a free API key:
 ## Latency rules
 
 - Query independent APIs concurrently, not sequentially.
+- Stop after three exact, healthy candidates; do not wait for a slower optional provider merely to enlarge the list.
 - Use one exact title/year query first. Try aliases or broader searches only after an exact miss.
 - Apply short per-provider timeouts and continue with successful providers; one slow source must not block the others.
 - Cache authoritative title IDs and successful search responses for the current task. Do not repeat an unchanged query.

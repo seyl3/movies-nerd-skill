@@ -187,6 +187,59 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["seeders"], 50)
 
+    def test_exact_title_match_requires_requested_year(self):
+        self.assertTrue(search_releases.matches_requested_title(
+            "Amelie 2001 1080p BluRay x265", "Amélie", 2001,
+        ))
+        self.assertFalse(search_releases.matches_requested_title(
+            "Amelie 2014 1080p BluRay x265", "Amélie", 2001,
+        ))
+
+    def test_fast_api_success_skips_qbittorrent_search(self):
+        candidates = [
+            {
+                "title": f"Example 2024 1080p x265 release {index}",
+                "size": 2_000_000_000,
+                "seeders": 20,
+                "magnet": search_releases.minimal_magnet(str(index) * 40, "Example"),
+            }
+            for index in range(1, 4)
+        ]
+        with (
+            patch.object(search_releases, "search_knaben", return_value=candidates),
+            patch.object(search_releases, "search_apibay", return_value=[]),
+            patch.object(search_releases, "search_qbt") as qbt_search,
+        ):
+            results, reports, early = search_releases.search_all(
+                "Example 2024", 5, False, True,
+                title="Example", year=2024, max_bytes=15 * qbt.GIB,
+                runtime_minutes=90,
+            )
+        self.assertEqual(len(results), 3)
+        self.assertTrue(early)
+        self.assertEqual(reports["qbt_torznab"]["skipped"], "enough exact healthy API results")
+        qbt_search.assert_not_called()
+
+    def test_qbittorrent_search_runs_when_fast_results_are_insufficient(self):
+        one = {
+            "title": "Example 2024 1080p x265",
+            "size": 2_000_000_000,
+            "seeders": 20,
+            "magnet": search_releases.minimal_magnet("1" * 40, "Example"),
+        }
+        with (
+            patch.object(search_releases, "search_knaben", return_value=[one]),
+            patch.object(search_releases, "search_apibay", return_value=[]),
+            patch.object(search_releases, "search_qbt", return_value=[]) as qbt_search,
+        ):
+            _, _, early = search_releases.search_all(
+                "Example 2024", 5, False, True,
+                title="Example", year=2024, max_bytes=15 * qbt.GIB,
+                runtime_minutes=90,
+            )
+        self.assertFalse(early)
+        qbt_search.assert_called_once()
+
     def test_nfo_escapes_untrusted_text(self):
         payload = write_nfo.render("movie", {"title": "A & B <C>", "year": 2024})
         root = ET.fromstring(payload)

@@ -12,6 +12,7 @@ import ssl
 import subprocess
 import sys
 import time
+import unicodedata
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -305,15 +306,47 @@ def deduplicate(results: list[dict]) -> list[dict]:
     return list(selected.values())
 
 
-def search_all(query: str, timeout: float, series: bool, use_qbt: bool) -> tuple[list[dict], dict]:
-    providers = {
-        "knaben": lambda: search_knaben(query, timeout),
-        "apibay": lambda: search_apibay(query, timeout),
-    }
-    if use_qbt:
-        providers["qbt_torznab"] = lambda: search_qbt(query, timeout, series)
-    reports = {}
-    combined = []
+def title_tokens(value: object) -> list[str]:
+    folded = "".join(
+        character
+        for character in unicodedata.normalize("NFKD", str(value).casefold())
+        if not unicodedata.combining(character)
+    )
+    return re.findall(r"\w+", folded, re.UNICODE)
+
+
+def matches_requested_title(release_title: object, title: str, year: int | None) -> bool:
+    release = title_tokens(release_title)
+    expected = title_tokens(title)
+    if not expected or len(release) < len(expected):
+        return False
+    phrase_found = any(
+        release[index:index + len(expected)] == expected
+        for index in range(len(release) - len(expected) + 1)
+    )
+    return phrase_found and (year is None or str(year) in release)
+
+
+def usable_count(
+    results: list[dict], title: str, year: int | None, max_bytes: int,
+    runtime_minutes: float | None,
+) -> int:
+    usable = 0
+    for item in results:
+        ranked = normalize(item, max_bytes, runtime_minutes)
+        if (
+            matches_requested_title(item.get("title"), title, year)
+            and ranked["eligible"]
+            and ranked["magnet"]
+            and ranked["seeders"] > 0
+        ):
+            usable += 1
+    return usable
+
+
+def run_providers(providers: dict[str, object]) -> tuple[list[dict], dict]:
+    reports: dict[str, dict] = {}
+    combined: list[dict] = []
     with ThreadPoolExecutor(max_workers=len(providers)) as executor:
         futures = {executor.submit(call): name for name, call in providers.items()}
         for future in as_completed(futures):
@@ -324,7 +357,34 @@ def search_all(query: str, timeout: float, series: bool, use_qbt: bool) -> tuple
                 reports[name] = {"ok": True, "results": len(items)}
             except (SearchError, QbtError, OSError) as exc:
                 reports[name] = {"ok": False, "error": str(exc)[:200]}
-    return deduplicate(combined), reports
+    return combined, reports
+
+
+def search_all(
+    query: str, timeout: float, series: bool, use_qbt: bool, *, title: str,
+    year: int | None, max_bytes: int, runtime_minutes: float | None,
+    minimum_usable: int = 3,
+) -> tuple[list[dict], dict, bool]:
+    started = time.monotonic()
+    fast_timeout = min(2.0, timeout)
+    combined, reports = run_providers({
+        "knaben": lambda: search_knaben(query, fast_timeout),
+        "apibay": lambda: search_apibay(query, fast_timeout),
+    })
+    combined = deduplicate(combined)
+    early_success = usable_count(combined, title, year, max_bytes, runtime_minutes) >= minimum_usable
+    if use_qbt and not early_success:
+        remaining = max(0.5, timeout - (time.monotonic() - started))
+        qbt_items, qbt_report = run_providers({
+            "qbt_torznab": lambda: search_qbt(query, remaining, series),
+        })
+        combined = deduplicate(combined + qbt_items)
+        reports.update(qbt_report)
+    elif use_qbt:
+        reports["qbt_torznab"] = {
+            "ok": True, "results": 0, "skipped": "enough exact healthy API results",
+        }
+    return combined, reports, early_success
 
 
 def main() -> int:
@@ -343,19 +403,20 @@ def main() -> int:
         parser.error("--max-gib must be between 0 and 100")
     query = checked_query(args.title, args.year)
     started = time.monotonic()
-    results, providers = search_all(query, args.timeout, args.series, not args.no_qbt_search)
     max_bytes = int(args.max_gib * GIB)
-    usable = 0
-    for item in results:
-        ranked = normalize(item, max_bytes, args.runtime_min)
-        if ranked["eligible"] and ranked["magnet"] and ranked["seeders"] > 0:
-            usable += 1
+    results, providers, early_success = search_all(
+        query, args.timeout, args.series, not args.no_qbt_search,
+        title=args.title, year=args.year, max_bytes=max_bytes,
+        runtime_minutes=args.runtime_min,
+    )
+    usable = usable_count(results, args.title, args.year, max_bytes, args.runtime_min)
     output = {
         "query": query,
         "elapsed_ms": round((time.monotonic() - started) * 1000),
         "providers": providers,
         "results": results,
         "usable_results": usable,
+        "early_success": early_success,
         "fallback": {"needed": usable == 0, "next": "ext-browser" if usable == 0 else None},
     }
     json.dump(output, sys.stdout, ensure_ascii=False, indent=2)
