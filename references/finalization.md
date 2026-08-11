@@ -15,8 +15,8 @@ Keep every prepared artifact in the matching hidden staging root. Do not inspect
 
 ## After the transfer completes
 
-1. Stop the torrent and run Gate 2 once. Reuse its selected path, duration, dimensions, codec, and companion inventory for the rest of the task.
-2. Probe the selected media once for complete stream and chapter metadata. Reuse that result for subtitle coverage, track labels, and remux decisions.
+1. Stop the torrent and run Gate 2 once. It creates a bounded full `media_probe` for every selected movie or episode. Save it in the job manifest and reuse its path, duration, dimensions, codecs, streams, chapters, and companion inventory.
+2. Pass the saved Gate 2 JSON or probe to `check_subtitles.py`, `validate_subtitle.py`, and `remux_mkv.py` with `--probe-json`. Each consumer verifies the file snapshot and rejects stale data instead of silently probing again.
 3. If the source is already MKV and its language tags, clean track titles, default/forced dispositions, streams, and chapters comply with the library policy, keep it unchanged. Do not rewrite a multi-gigabyte file merely to produce an identical MKV.
 4. If the container or track metadata needs correction, use one verified `ffmpeg -c copy` remux. Never re-encode solely for naming or container preference.
 5. Validate the already-prepared subtitles, images, and XML, then atomically install the media and sidecars. Do not fetch the same metadata or artwork twice.

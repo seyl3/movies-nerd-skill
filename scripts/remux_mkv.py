@@ -10,6 +10,7 @@ import subprocess
 from pathlib import Path
 
 from _common import staging_roots
+from media_probe import ffprobe_data, load_report, probe_media
 LANG_NAMES = {
     "eng": "English", "fre": "French", "ita": "Italian", "spa": "Spanish",
     "ger": "German", "jpn": "Japanese", "kor": "Korean", "ara": "Arabic",
@@ -40,11 +41,7 @@ def run(args: list[str]) -> subprocess.CompletedProcess:
 
 
 def probe(path: Path) -> dict:
-    result = run([
-        "ffprobe", "-v", "error", "-show_streams", "-show_chapters",
-        "-show_format", "-of", "json", str(path),
-    ])
-    return json.loads(result.stdout)
+    return ffprobe_data(probe_media(path))
 
 
 def stream_signature(info: dict) -> list[tuple]:
@@ -99,6 +96,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("input", type=Path)
     parser.add_argument("output", type=Path)
+    parser.add_argument("--probe-json", type=Path, help="saved full probe or Gate 2 JSON")
     parser.add_argument("--audio-language", action="append", default=[], metavar="INDEX=LANG")
     parser.add_argument("--subtitle-language", action="append", default=[], metavar="INDEX=LANG")
     args = parser.parse_args()
@@ -115,7 +113,7 @@ def main() -> int:
 
     audio_map = overrides(args.audio_language)
     subtitle_map = overrides(args.subtitle_language)
-    info = probe(source)
+    info = ffprobe_data(load_report(args.probe_json, source)) if args.probe_json else probe(source)
     streams = info.get("streams", [])
     audio = [stream for stream in streams if stream.get("codec_type") == "audio"]
     subtitles = [stream for stream in streams if stream.get("codec_type") == "subtitle"]

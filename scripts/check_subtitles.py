@@ -6,8 +6,9 @@ from __future__ import annotations
 import argparse
 import json
 import re
-import subprocess
 from pathlib import Path
+
+from media_probe import ffprobe_data, load_report, probe_media
 
 LANG_MAP = {
     "en": "eng", "eng": "eng", "english": "eng",
@@ -16,20 +17,12 @@ LANG_MAP = {
 }
 
 
-def embedded_languages(media: Path) -> list[dict]:
-    result = subprocess.run(
-        [
-            "ffprobe", "-v", "error", "-select_streams", "s",
-            "-show_entries", "stream=index:stream_tags=language,title,handler_name",
-            "-of", "json", str(media),
-        ],
-        check=True,
-        text=True,
-        capture_output=True,
-        timeout=60,
-    )
+def embedded_languages(media: Path, report: dict | None = None) -> list[dict]:
+    info = ffprobe_data(report or probe_media(media))
     output = []
-    for stream in json.loads(result.stdout).get("streams", []):
+    for stream in info.get("streams", []):
+        if stream.get("codec_type") != "subtitle":
+            continue
         tags = stream.get("tags") or {}
         raw = str(tags.get("language") or "und").lower()
         output.append({
@@ -56,9 +49,11 @@ def sidecar_language(path: Path, stem: str) -> str | None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("media", type=Path)
+    parser.add_argument("--probe-json", type=Path, help="saved full probe or Gate 2 JSON")
     args = parser.parse_args()
     media = args.media.resolve(strict=True)
-    embedded = embedded_languages(media)
+    report = load_report(args.probe_json, media) if args.probe_json else None
+    embedded = embedded_languages(media, report)
     sidecars = []
     for path in sorted(media.parent.iterdir()):
         if path.is_file() and not path.name.startswith("._") and path.suffix.lower() in {".srt", ".ass", ".ssa", ".vtt", ".sub"}:

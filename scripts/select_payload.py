@@ -8,8 +8,9 @@ import json
 import os
 import re
 import stat
-import subprocess
 from pathlib import Path
+
+from media_probe import ProbeError, probe_media
 
 from payload_safety import (
     ALLOWED_COMPANIONS,
@@ -25,43 +26,6 @@ EXTRA_PATTERN = re.compile(
     r"behind[ ._-]*the[ ._-]*scenes|deleted[ ._-]*scene|making[ ._-]*of)(?:$|[ ._\-/])",
     re.I,
 )
-
-
-def probe(path: Path) -> dict:
-    try:
-        result = subprocess.run(
-            [
-                "ffprobe", "-v", "error", "-select_streams", "v:0",
-                "-show_entries", "format=duration:stream=width,height,codec_name",
-                "-of", "json", str(path),
-            ],
-            check=False,
-            text=True,
-            capture_output=True,
-            timeout=60,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return {"valid_media": False, "probe_error": str(exc)[:500]}
-    if result.returncode != 0:
-        return {"valid_media": False, "probe_error": result.stderr.strip()[:500]}
-    try:
-        data = json.loads(result.stdout)
-    except json.JSONDecodeError:
-        return {"valid_media": False, "probe_error": "ffprobe returned invalid JSON"}
-    stream = (data.get("streams") or [{}])[0]
-    try:
-        duration = float((data.get("format") or {}).get("duration") or 0)
-    except (TypeError, ValueError):
-        duration = 0
-    return {
-        "valid_media": bool(
-            stream.get("width") and stream.get("height") and stream.get("codec_name") and duration > 0
-        ),
-        "duration_seconds": round(duration, 3),
-        "width": stream.get("width"),
-        "height": stream.get("height"),
-        "video_codec": stream.get("codec_name"),
-    }
 
 
 def payload_paths(root: Path):
@@ -144,21 +108,12 @@ def scan_payload(root: Path, series: bool = False) -> dict:
                 "bytes": before_probe.st_size,
                 "looks_like_extra": bool(EXTRA_PATTERN.search(relative)),
             }
-            item.update(probe(path))
             try:
-                after_probe = path.stat(follow_symlinks=False)
-            except OSError as exc:
-                hazards.append({"path": relative, "reason": f"cannot inspect media after probe: {exc}"})
-                continue
-            before_identity = (
-                before_probe.st_dev, before_probe.st_ino, before_probe.st_size, before_probe.st_mtime_ns
-            )
-            after_identity = (
-                after_probe.st_dev, after_probe.st_ino, after_probe.st_size, after_probe.st_mtime_ns
-            )
-            if before_identity != after_identity:
-                hazards.append({"path": relative, "reason": "media changed during probe"})
-                continue
+                full_probe = probe_media(path)
+                item["probe"] = full_probe
+                item.update(full_probe["summary"])
+            except (OSError, ProbeError) as exc:
+                item.update({"valid_media": False, "probe_error": str(exc)[:500]})
             if not item.get("valid_media"):
                 hazards.append({
                     "path": relative,

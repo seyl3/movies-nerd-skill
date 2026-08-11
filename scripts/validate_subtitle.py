@@ -10,6 +10,8 @@ import re
 import subprocess
 import sys
 
+from media_probe import load_report
+
 MAX_BYTES = 5 * 1024 * 1024
 TIMESTAMP_RE = re.compile(
     r"(?m)^(\d{1,2}):(\d{2}):(\d{2})[,.](\d{3})\s*-->\s*"
@@ -105,6 +107,7 @@ def main() -> int:
     parser.add_argument("subtitle", type=Path)
     parser.add_argument("--expected-language", choices=("en", "fr"), required=True)
     parser.add_argument("--media", type=Path)
+    parser.add_argument("--probe-json", type=Path, help="saved full probe or Gate 2 JSON")
     parser.add_argument("--forced", action="store_true")
     args = parser.parse_args()
     try:
@@ -114,7 +117,13 @@ def main() -> int:
         if not subtitle.is_file() or subtitle.suffix.lower() != ".srt":
             raise ValueError("subtitle must be a regular, non-symlink .srt file")
         data = subtitle.read_bytes()
-        duration = media_duration(args.media.resolve(strict=True)) if args.media else None
+        if args.probe_json and not args.media:
+            raise ValueError("--probe-json requires --media to verify that the probe is current")
+        if args.probe_json:
+            report = load_report(args.probe_json, args.media.resolve(strict=True))
+            duration = float(report["summary"]["duration_seconds"])
+        else:
+            duration = media_duration(args.media.resolve(strict=True)) if args.media else None
         report = validate_bytes(data, args.expected_language, duration, args.forced)
         report["path"] = str(subtitle)
         print(json.dumps(report, ensure_ascii=False, indent=2))

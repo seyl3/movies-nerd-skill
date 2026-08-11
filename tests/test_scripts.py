@@ -16,7 +16,9 @@ sys.path.insert(0, str(SCRIPTS))
 import _common
 import qbittorrent_api as qbt
 import clean_clutter
+import check_subtitles
 import job_manifest
+import media_probe
 import monitor_download
 import opensubtitles_api
 import payload_safety
@@ -339,6 +341,55 @@ class PolicyTests(unittest.TestCase):
             self.assertTrue(any("ZIP" in reason for reason in image_reasons))
             self.assertFalse(report["safe_to_continue"])
             self.assertEqual(len(report["hazards"]), 2)
+
+    def test_saved_media_probe_is_reused_for_subtitle_coverage(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            media = root / "Example.mkv"
+            media.write_bytes(b"safe fixture")
+            info = media_probe.clean_probe({
+                "streams": [
+                    {"index": 0, "codec_type": "video", "codec_name": "h264", "width": 1920, "height": 1080},
+                    {"index": 1, "codec_type": "subtitle", "codec_name": "subrip", "tags": {"language": "eng", "title": "English"}},
+                ],
+                "chapters": [],
+                "format": {"format_name": "matroska,webm", "duration": "5400.0", "size": "12"},
+            })
+            report = {
+                "schema": media_probe.SCHEMA,
+                "media": str(media.resolve()),
+                "snapshot": media_probe.snapshot(media),
+                "ffprobe": info,
+                "summary": media_probe.summary(info),
+            }
+            gate = root / "gate.json"
+            gate.write_text(json.dumps({"selected": [{"path": media.name, "probe": report}]}), encoding="utf-8")
+            loaded = media_probe.load_report(gate, media)
+            embedded = check_subtitles.embedded_languages(media, loaded)
+            self.assertEqual(embedded[0]["language"], "eng")
+            self.assertEqual(loaded["summary"]["duration_seconds"], 5400.0)
+
+    def test_saved_media_probe_rejects_changed_media(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            media = root / "Example.mkv"
+            media.write_bytes(b"first")
+            info = media_probe.clean_probe({
+                "streams": [{"index": 0, "codec_type": "video", "codec_name": "h264", "width": 1920, "height": 1080}],
+                "format": {"format_name": "matroska,webm", "duration": "90"},
+            })
+            report = {
+                "schema": media_probe.SCHEMA,
+                "media": str(media.resolve()),
+                "snapshot": media_probe.snapshot(media),
+                "ffprobe": info,
+                "summary": media_probe.summary(info),
+            }
+            saved = root / "probe.json"
+            saved.write_text(json.dumps(report), encoding="utf-8")
+            media.write_bytes(b"changed")
+            with self.assertRaises(media_probe.ProbeError):
+                media_probe.load_report(saved, media)
 
     def test_valid_srt_and_html_rejection(self):
         cues = "\n\n".join(
