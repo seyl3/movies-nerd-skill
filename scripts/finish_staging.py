@@ -36,6 +36,8 @@ def verify_final_destination(destination: Path) -> dict:
             raise ValueError("final destination contains a symlink")
         if not path.is_file():
             continue
+        if path.name == ".DS_Store" or path.name.startswith("._"):
+            continue
         mode = path.lstat().st_mode
         if not stat.S_ISREG(mode):
             raise ValueError("final destination contains a special file")

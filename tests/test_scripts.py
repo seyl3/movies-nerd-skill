@@ -620,6 +620,16 @@ class PolicyTests(unittest.TestCase):
             self.assertTrue(quarantine.is_dir())
             self.assertTrue((quarantine / "transfers" / ("a" * 40) / "junk.nfo").is_file())
 
+    def test_finished_job_verification_ignores_macos_sidecars(self):
+        with tempfile.TemporaryDirectory() as raw:
+            final = Path(raw) / "Example (2024)"
+            final.mkdir()
+            (final / "._Example (2024) [1080p].mkv").write_bytes(b"AppleDouble")
+            (final / "._Example (2024) [1080p].nfo").write_bytes(b"AppleDouble")
+            (final / "._Example (2024).png").write_bytes(b"AppleDouble")
+            with self.assertRaisesRegex(ValueError, "not fully organized"):
+                finish_staging.verify_final_destination(final)
+
     def test_subtitle_provider_asks_once_then_falls_back(self):
         ask = subtitle_provider.plan("Example", 2024, "Example.2024.1080p", ["en", "fr"], False, {})
         fallback = subtitle_provider.plan("Example", 2024, "Example.2024.1080p", ["en", "fr"], True, {})
@@ -685,7 +695,7 @@ class PolicyTests(unittest.TestCase):
             self.assertTrue((clean / "Example.mkv").is_file())
             self.assertTrue((source / "bad.nfo").is_file())
             self.assertFalse((source / "Example.mkv").exists())
-            self.assertTrue(result["verification"]["safe_to_continue"])
+            self.assertTrue(result["verification"]["safe_to_extract_selected"])
 
     def test_saved_media_probe_is_reused_for_subtitle_coverage(self):
         with tempfile.TemporaryDirectory() as raw:

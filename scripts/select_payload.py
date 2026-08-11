@@ -208,7 +208,7 @@ def extract_selected(root: Path, output: Path, report: dict, series: bool = Fals
             os.replace(source, destination)
             moved.append((source, destination))
         verified = scan_payload(clean, series)
-        if not verified["safe_to_continue"] or verified["cleanup_required"]:
+        if not verified["safe_to_extract_selected"]:
             raise ValueError("cleaned media did not pass verification")
         return {
             "clean_payload": str(clean),
@@ -246,7 +246,7 @@ def main() -> int:
             print(json.dumps(output, ensure_ascii=False, indent=2))
             return 5
     print(json.dumps(output, ensure_ascii=False, indent=2))
-    if args.commit and output.get("cleaning", {}).get("verification", {}).get("safe_to_continue"):
+    if args.commit and output.get("cleaning", {}).get("verification", {}).get("safe_to_extract_selected"):
         return 0
     return 0 if output["safe_to_continue"] else 4
 
