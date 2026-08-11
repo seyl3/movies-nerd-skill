@@ -88,14 +88,14 @@ Never commit those values, put them in magnet URLs, or paste them into metadata 
 
 ## Prepare the library paths
 
-Before library work, Movies Nerd asks the user for two separate absolute paths. Configure them for the current shell with:
+Ask only for the library path needed by the current request, and only when the user has not already supplied or established it. Folder names are descriptive, not mandatory: `/Volumes/ssd/Films` is a valid movie-library root and must not become `/Volumes/ssd/Films/Movies`. Configure whichever path is relevant for the current shell:
 
 ```sh
 export MOVIES_NERD_MOVIES_ROOT='/absolute/path/to/Movies'
 export MOVIES_NERD_SERIES_ROOT='/absolute/path/to/Series'
 ```
 
-If the user does not specify paths, use `~/Documents/Movies` and `~/Documents/Series`. Staging is always `.incoming/Movies Nerd` inside the applicable selected root. The roots must be distinct, non-nested directories; never use a home directory, filesystem root, or shared volume root as a library root.
+If the user chooses the defaults, use `~/Documents/Movies` and `~/Documents/Series`. Staging is always `.incoming/Movies Nerd` inside the applicable selected root. When both roots are known they must be distinct, non-nested directories; never use a home directory, filesystem root, or shared volume root as a library root. Do not require a path merely because the unrelated library root is unknown.
 
 Create or mount the selected roots before the first transfer. Movies Nerd creates only the hidden staging subdirectory when a confirmed transfer is prepared.
 

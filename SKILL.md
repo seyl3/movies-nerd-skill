@@ -25,7 +25,7 @@ Target this skill at film fans and collectors who are not expected to understand
 - Read [references/library-policy.md](references/library-policy.md) before ranking a release or changing either media library.
 - Read [references/finalization.md](references/finalization.md) immediately after a confirmed transfer starts.
 - Read [references/recommendations.md](references/recommendations.md) after successfully importing a movie.
-- On a new machine or when roots are not established in the current task, read [references/setup.md](references/setup.md), resolve the two library roots, and run `scripts/check_environment.py` before doing anything else.
+- On a new machine or when the destination root is not established in the current task, read [references/setup.md](references/setup.md), resolve only the root needed for the current request, and run the relevant environment check before a transfer.
 
 ## User interaction
 
@@ -36,7 +36,7 @@ Target this skill at film fans and collectors who are not expected to understand
 
 ## Workflow
 
-1. Ask the user to specify separate Movies and Series roots unless both were already established in the current task. If the user does not specify them, use `~/Documents/Movies` and `~/Documents/Series`. Set `MOVIES_NERD_MOVIES_ROOT` and `MOVIES_NERD_SERIES_ROOT` to absolute paths for every bundled-script invocation. Never infer a shared volume root.
+1. Use the destination path already supplied by the user or established in the current task. A movie root may have any folder name: `Films`, `Cinema`, and `Movies` are equally valid. Never reject a safe absolute path merely because its final folder name differs from `Movies` or `Series`, and never append a redundant `/Movies` or `/Series` subfolder. If the relevant path is genuinely unknown, ask only: **“Where would you like me to save your movies?”** or **“Where would you like me to save your series?”** Do not ask for the unrelated library root. Set the relevant `MOVIES_NERD_MOVIES_ROOT` or `MOVIES_NERD_SERIES_ROOT` value for bundled scripts; the unused root may keep its default under `~/Documents`.
 2. Inventory the destination library and available disk space. Do not download a title already present unless the user requests a replacement.
 3. Resolve the exact title, year, media type, and authoritative IDs before searching. Create one staging-only manifest with `scripts/job_manifest.py` and update it after each material transition. Resume completed work from this manifest rather than repeating it.
 4. Search read-only and API-first. Run `scripts/search_releases.py` with its five-second default budget; it queries no-key APIs concurrently and also uses configured qBittorrent/Torznab providers. Rank its combined results immediately. Follow [references/search.md](references/search.md).

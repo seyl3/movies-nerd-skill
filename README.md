@@ -17,7 +17,7 @@ Movies Nerd is an opinionated, all-in-one Codex skill for film fans. A specific-
 - Series: `<SERIES_ROOT>/<Series> (<Year>)/Season NN/`
 - Videos: title/year or episode name plus a resolution tag such as `[1080p]`.
 
-Roots are selected separately. Defaults are `~/Documents/Movies` and `~/Documents/Series`; no shared drive layout is assumed.
+Movies and series roots are selected independently when needed. Their folder names are unrestricted—`/Volumes/ssd/Films` is a valid movie root. Optional defaults are `~/Documents/Movies` and `~/Documents/Series`; no shared drive layout is assumed.
 
 ## Setup
 

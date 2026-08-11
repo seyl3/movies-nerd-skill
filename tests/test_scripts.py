@@ -119,6 +119,15 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(movies, Path("/private/tmp/media/Movies"))
         self.assertEqual(series, Path("/private/tmp/media/Series"))
 
+    def test_movie_root_does_not_need_to_be_named_movies(self):
+        env = {
+            _common.MOVIES_ROOT_ENV: "/Volumes/ssd/Films",
+            _common.SERIES_ROOT_ENV: "/Volumes/ssd/Series",
+        }
+        movies, series = _common.library_roots(env)
+        self.assertEqual(movies, Path("/Volumes/ssd/Films"))
+        self.assertEqual(series, Path("/Volumes/ssd/Series"))
+
     def test_library_roots_reject_nested_paths(self):
         env = {
             _common.MOVIES_ROOT_ENV: "/private/tmp/media",
