@@ -2,6 +2,8 @@
 
 Movies Nerd is an opinionated, all-in-one Codex skill for nontechnical film fans. No torrent or command-line knowledge is expected: it shows one good option, asks once, stays with the download until it is organized, then returns film links and recommendations.
 
+Every new task identifies itself once as `Movies Nerd vX.Y.Z`, so users always know which installed release they are talking to. `VERSION` is the single source of truth, releases use SemVer tags, and `python3 scripts/skill_version.py` prints the exact installed version.
+
 ## Features
 
 - Picks an efficient 4K release up to 15 GiB, or a space-efficient 1080p fallback.
