@@ -20,6 +20,7 @@ The user never sees the hidden candidate comparison, duplicate pruning, provider
 `Downloading` is an active state, not a completed result. Never send the final response merely because the transfer started successfully.
 
 - Keep monitoring in the same task until the transfer completes, then finish verification, naming, sidecars, and import.
+- Keep `run_job.py` attached to the execution session; never background it. A yielded session identifier is a continuation handle, not permission to end the task.
 - A bounded monitoring window ending while the transfer is healthy means continue monitoring automatically. It does not mean stop the task.
 - Use commentary for a rare progress note: `Into the Abyss (2011) is downloading. I’ll let you know when it’s ready.` Do not add bullets, paths, codecs, safety checks, excluded files, or other internal details.
 - Do not ask the user to check back, send another message, or tell Movies Nerd when the download finishes.

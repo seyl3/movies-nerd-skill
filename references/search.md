@@ -4,7 +4,7 @@ Treat speed as a correctness requirement. Under a healthy connection, target a u
 
 ## Discovery
 
-1. Run `scripts/search_releases.py` first. It queries YTS, Knaben, APIBay, and Magnetz concurrently under one shared deadline; it uses configured qBittorrent/Torznab providers only when the fast APIs do not produce enough exact candidates.
+1. Run `scripts/prepare_job.py` first. It queries YTS, Knaben, APIBay, and Magnetz concurrently under one shared deadline, uses configured qBittorrent/Torznab providers only when the fast APIs do not produce enough exact candidates, and records the result directly in the new job manifest. No caller-managed search JSON file is needed.
 2. Pass the exact IMDb ID with `--imdb-id` whenever known. YTS is the movie fast path. Prefer its allowlisted direct `.torrent` URL because `torrent_metadata.py` validates its bencoding, size, paths, and info hash before qBittorrent receives it. If direct metadata fails, use the tracker-aware magnet for the same hash.
 3. Treat reported seed counts only as discovery hints. Zero reported seeders does not disqualify a release. The bounded live qBittorrent probe decides swarm health.
 4. Deduplicate by info hash and prefer the same hash's validated direct-metadata record. Exclude hashes remembered as dead for 72 hours. Use provider latency and recent success only as a small ranking adjustment.
@@ -13,7 +13,7 @@ Treat speed as a correctness requirement. Under a healthy connection, target a u
 
 ## Live selection after confirmation
 
-Run `scripts/acquire.py --job <manifest> --commit`. It performs the qBittorrent preflight, opens the app when needed, validates metadata, and probes actual swarm performance.
+After confirmation, run `scripts/run_job.py --job <manifest> --commit` for a movie, or keep `scripts/acquire.py --job <manifest> --commit` foreground for a series. It performs the qBittorrent preflight, opens the app when needed, validates metadata, and probes actual swarm performance.
 
 - Probe at most three candidates together, capped at 2 MiB/s each and roughly 16 MiB of downloaded probe data.
 - Score actual downloaded-byte growth, median speed, availability, connected peers, metadata latency, then discovery score.
