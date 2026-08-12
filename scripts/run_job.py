@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Keep one confirmed Movies Nerd job foreground through its ready handoff."""
+"""Keep one authorized Movies Nerd job foreground through its ready handoff."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ import acquire
 from acquire import ControllerError, JobLock, TerminalAcquisitionError, bounded_integer
 from finalization_queue import required_tasks, start_all, task_state
 from finalize_job import FinalizeError, finalize
+from finalize_series import finalize as finalize_series
 from job_manifest import ManifestError, load_job
 from qbittorrent_api import QbtAccessDenied, QbtError, QbtUnavailable
 
@@ -61,7 +62,7 @@ def run(
                     "next": "finish the already-requested preparation and resume this same job",
                 }
             time.sleep(min(2, max(0.1, deadline - now)))
-        return finalize(checked)
+        return finalize(checked) if job.get("kind") == "movie" else finalize_series(checked)
 
 
 def main() -> int:
@@ -79,7 +80,7 @@ def main() -> int:
     parser.add_argument("--commit", action="store_true")
     args = parser.parse_args()
     if not args.commit:
-        parser.error("the foreground workflow requires --commit after confirmation")
+        parser.error("the foreground workflow requires --commit for the requested download")
     try:
         result = run(
             args.job, poll_seconds=args.poll_seconds,

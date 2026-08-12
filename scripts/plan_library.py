@@ -55,10 +55,13 @@ def episode_plan(args) -> dict:
     _movies_root, series_root = library_roots()
     show = series_root / f"{title} ({args.year})"
     season = show / f"Season {args.season:02d}"
-    base = (
-        f"{title} ({args.year}) - S{args.season:02d}E{args.episode:02d} - "
-        f"{episode_title} [{res}]"
-    )
+    episode_end = getattr(args, "episode_end", None)
+    if episode_end is not None and episode_end <= args.episode:
+        raise ValueError("multi-episode end must be greater than its first episode")
+    code = f"S{args.season:02d}E{args.episode:02d}"
+    if episode_end is not None:
+        code += f"-E{episode_end:02d}"
+    base = f"{title} ({args.year}) - {code} - {episode_title} [{res}]"
     return {
         "kind": "episode",
         "show_folder": str(show),
@@ -89,12 +92,16 @@ def main() -> int:
     episode.add_argument("--year", type=int, required=True)
     episode.add_argument("--season", type=int, required=True)
     episode.add_argument("--episode", type=int, required=True)
+    episode.add_argument("--episode-end", type=int)
     episode.add_argument("--episode-title", required=True)
     episode.add_argument("--resolution", required=True)
     args = parser.parse_args()
     if not (1888 <= args.year <= 2100):
         parser.error("year is outside the supported range")
-    if args.kind == "episode" and not (0 <= args.season <= 99 and 0 <= args.episode <= 999):
+    if args.kind == "episode" and not (
+        0 <= args.season <= 99 and 0 <= args.episode <= 999
+        and (args.episode_end is None or 0 <= args.episode_end <= 999)
+    ):
         parser.error("season or episode number is outside the supported range")
     plan = movie_plan(args) if args.kind == "movie" else episode_plan(args)
     print(json.dumps(plan, ensure_ascii=False, indent=2))
