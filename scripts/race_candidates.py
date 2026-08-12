@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Privately compare confirmed candidates, keep the best, and remove duplicates."""
+"""Privately compare authorized candidates, keep the best, and remove duplicates."""
 
 from __future__ import annotations
 
@@ -350,7 +350,7 @@ def race(
             "wave": wave_number + 1,
         }
 
-    raise QbtError("confirmed candidates had no live swarm during bounded probes")
+    raise QbtError("authorized candidates had no live swarm during bounded probes")
 
 
 def cleanup_attempts(client, hashes: list[str]) -> bool:
@@ -375,7 +375,7 @@ def main() -> int:
     parser.add_argument("--replace-hash", help="replace a stalled winner inside the confirmed envelope")
     args = parser.parse_args()
     if not args.commit:
-        parser.error("candidate probing requires --commit after user confirmation")
+        parser.error("candidate probing requires --commit for the requested download")
     attempted: list[str] = []
     client = None
     try:
@@ -391,7 +391,7 @@ def main() -> int:
             transition_job(job_path, "replacement-started")
         else:
             if job.get("state") != "confirmed" or job.get("steps", {}).get("confirmation") != "complete":
-                raise ManifestError("job must record confirmation before candidate probing")
+                raise ManifestError("job must be authorized by an explicit download request")
             transition_job(job_path, "metadata-started")
         candidates = pool_from_job(job, excluded)
         attempted = [candidate_hash(candidate) for candidate in candidates]

@@ -296,7 +296,7 @@ def remove_all_owned(client, job: dict) -> list[str]:
 def finalize(job_path: Path) -> dict:
     checked, job = load_job(job_path)
     if job.get("kind") != "movie":
-        raise FinalizeError("automatic batch finalization currently requires a movie job")
+        raise FinalizeError("movie finalization requires a movie job")
     cached_handoff = ((job.get("cache") or {}).get("handoff") or {})
     if job.get("state") == "imported":
         metadata = None
@@ -591,7 +591,7 @@ def main() -> int:
     parser.add_argument("--commit", action="store_true")
     args = parser.parse_args()
     if not args.commit:
-        parser.error("finalization requires --commit after the confirmed download")
+        parser.error("finalization requires --commit for the requested download")
     try:
         print(json.dumps(finalize(args.job), ensure_ascii=False, indent=2))
         return 0

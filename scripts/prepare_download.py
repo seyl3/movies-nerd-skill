@@ -64,7 +64,7 @@ def main() -> int:
             "staging": str(stage),
             "library_root": str(expected_root),
             "library_root_exists": expected_root.is_dir(),
-            "next": "inspect client metadata, deselect extras, then confirm start",
+            "next": "inspect client metadata, deselect extras, then start",
         }
         if not args.execute:
             print(json.dumps(plan, indent=2, sort_keys=True))

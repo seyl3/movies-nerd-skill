@@ -36,7 +36,7 @@ def plan(
             "action": "use-opensubtitles-api",
             "provider": "OpenSubtitles",
             "api_base": "https://api.opensubtitles.com/api/v1",
-            "next": "search exact IDs/release, show candidates, then download a confirmed file ID to staging",
+            "next": "search exact IDs/release, select the best result, then download it to staging",
         }
     return base | {
         "action": "use-stremio-opensubtitles",

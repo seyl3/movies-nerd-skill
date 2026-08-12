@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run one confirmed Movies Nerd transfer through probing, failover, and completion."""
+"""Run one authorized Movies Nerd transfer through probing, failover, and completion."""
 
 from __future__ import annotations
 
@@ -475,7 +475,7 @@ def main() -> int:
     parser.add_argument("--commit", action="store_true")
     args = parser.parse_args()
     if not args.commit:
-        parser.error("the acquisition controller requires --commit after confirmation")
+        parser.error("the acquisition controller requires --commit for the requested download")
     checked = None
     try:
         checked, _job = load_job(args.job)

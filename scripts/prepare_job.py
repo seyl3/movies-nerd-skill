@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Search once, select one confirmation envelope, and persist a resumable job."""
+"""Search once, authorize from the explicit request, and persist a resumable job."""
 
 from __future__ import annotations
 
@@ -78,6 +78,7 @@ def prepare(
     }
     try:
         recorded = record_search_value(path, result)
+        transition_job(path, "confirmed")
     except Exception:
         try:
             transition_job(path, "failed", reason="job preparation failed")
@@ -98,7 +99,9 @@ def prepare(
         "source": primary.get("source"),
         "candidate_count": len(recorded.get("candidate_pool") or []),
         "elapsed_ms": result["elapsed_ms"],
-        "confirmation": "Download this?",
+        "authorized": True,
+        "authorization": "explicit-download-request",
+        "next": "run-job",
     }
 
 

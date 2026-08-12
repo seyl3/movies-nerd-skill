@@ -164,7 +164,7 @@ def assess_samples(
             "required": stalled,
             "standby_ready": standby_ready,
             "replacement_available": standby_ready,
-            "next": "probe the next confirmed candidate without asking again" if stalled else None,
+            "next": "probe the next authorized candidate automatically" if stalled else None,
         },
     }
 
