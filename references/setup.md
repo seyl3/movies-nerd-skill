@@ -21,17 +21,17 @@ No search key or account is required. `scripts/search_releases.py` queries YTS, 
 
 For broader coverage, optionally configure Jackett and add its Torznab feeds to qBittorrent's search engine. qBittorrent recommends Jackett, but Movies Nerd never installs it automatically. Keep Jackett on `127.0.0.1`, configure only the indexers you trust, and store its generated API key in qBittorrent rather than this repository.
 
-If a future supported high-quality provider offers a free API key, Movies Nerd may offer it once. Declining must immediately continue through the no-key route.
+Provider credentials never block a normal request. Movies Nerd does not offer or request subtitle API keys.
 
 ## Configure subtitles
 
-An OpenSubtitles API key is optional. If one is available, expose it through the current shell or an approved secret manager:
+No subtitle account or API key is required. Movies Nerd uses Stremio's official OpenSubtitles v3 service directly, without opening a subtitle website. If the user has voluntarily provided an OpenSubtitles API key, it may optionally be exposed through the current shell or an approved secret manager:
 
 ```sh
 export OPENSUBTITLES_API_KEY='<your key from opensubtitles.com>'
 ```
 
-Do not put the real key in this repository, a media filename, NFO, command-line argument, or provider URL. When no key is configured, Movies Nerd asks once whether the user has one. If not, it continues through the no-key Subtitle Cat browser workflow; no extra package or account is required.
+Do not put the real key in this repository, a media filename, NFO, command-line argument, or provider URL. When no key is configured, Movies Nerd silently continues through `scripts/stremio_subtitles.py`. It never asks the user for a key.
 
 ## Suggested manual installation
 

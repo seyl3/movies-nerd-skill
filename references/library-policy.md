@@ -87,9 +87,9 @@ Root: `<SERIES_ROOT>`
 - Clear default disposition from full subtitle tracks; preserve legitimate forced and hearing-impaired flags.
 - Keep external English and French sidecars as `.en.srt` and `.fr.srt`. Do not retain Portuguese subtitles unless the user asks.
 - Aim for both English and French coverage for every main movie and episode, using legitimate configured providers. Embedded tracks count when their language tags are verified.
-- Prefer an existing verified embedded or sidecar track, then the OpenSubtitles API when `OPENSUBTITLES_API_KEY` is configured, then a no-key Subtitle Cat browser download after the user confirms they have no key.
-- Ask about a missing API key once per task. A user who has no key must still receive the no-key fallback; do not repeatedly block on credentials.
-- On Subtitle Cat, search the exact release filename first and canonical title plus year second. Prefer an original human-authored English or French subtitle over an automatic translation; disclose when the selected track is translated.
+- Prefer an existing verified embedded or sidecar track, then the OpenSubtitles API when `OPENSUBTITLES_API_KEY` is already configured, then the official no-key Stremio subtitle endpoint automatically.
+- Never ask for a subtitle API key. If the user supplies one without prompting, use it through the environment and never echo it; otherwise remain on the no-key route.
+- Search the no-key service by authoritative IMDb ID and exact series episode identity. Try a bounded set in provider order and keep the first English/French track that passes full SRT and runtime validation.
 - Verify title, year, movie versus episode identity, season/episode numbers, release source, runtime, and timing coverage. A forced or partial track does not satisfy full-language coverage.
 - Do not hard-code subtitle-provider API keys in the skill. Read credentials from `OPENSUBTITLES_API_KEY` or an approved secret store only when needed, and never echo or commit them.
 

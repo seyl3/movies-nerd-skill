@@ -10,7 +10,7 @@ Version: **2.1.0**
 - Opens qBittorrent, compares several candidates briefly, keeps only the best one, deletes duplicate partial downloads, and replaces a later dead or slow transfer automatically.
 - Keeps the movie job attached through download, finalization, cleanup, and the ready handoff instead of stopping after “downloading.”
 - Prefers efficient 4K up to 15 GiB or space-efficient 1080p, MKV, original audio, and no extras.
-- Adds clean names, NFO metadata, posters, fanart, track labels, and English/French subtitles.
+- Adds clean names, NFO metadata, posters, fanart, track labels, and English/French subtitles through a no-key, no-browser default provider.
 - Salvages verified video when separate release junk appears.
 - Executes final verification/import and removes completed or failed job state, staging, trash, AppleDouble clutter, and exact Movies Nerd-owned qBittorrent entries before reporting success.
 - Returns direct Letterboxd/SensCritique links and two movie recommendations.
