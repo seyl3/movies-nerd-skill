@@ -3,13 +3,14 @@
 
 from __future__ import annotations
 
+import argparse
+import errno
 import json
 import os
 from pathlib import Path
 import platform
 import shutil
 import socket
-import subprocess
 import sys
 from urllib.parse import urlparse
 
@@ -21,23 +22,6 @@ def command(name: str) -> dict:
     return {"available": path is not None, "path": path}
 
 
-def sandbox_status() -> dict:
-    result = command("sandbox-exec")
-    result["usable"] = False
-    if result["available"]:
-        completed = subprocess.run(
-            [result["path"], "-p", "(version 1) (allow default)", "/usr/bin/true"],
-            check=False,
-            text=True,
-            capture_output=True,
-            timeout=5,
-        )
-        result["usable"] = completed.returncode == 0
-        if not result["usable"]:
-            result["note"] = (completed.stderr or completed.stdout).strip()[:300]
-    return result
-
-
 def root_status(path: Path) -> dict:
     result = {"path": str(path), "exists": path.is_dir(), "writable": os.access(path, os.W_OK)}
     if path.is_dir():
@@ -46,36 +30,54 @@ def root_status(path: Path) -> dict:
     return result
 
 
-def qbt_endpoint() -> dict:
+def qbt_endpoint(technical: bool = False) -> dict:
     raw = os.environ.get("QBITTORRENT_URL", "http://127.0.0.1:8080").rstrip("/")
     parsed = urlparse(raw)
     host = parsed.hostname
-    result = {"url": raw, "loopback": host in {"127.0.0.1", "::1", "localhost"}, "reachable": False}
-    if not result["loopback"] or parsed.scheme != "http" or not host:
-        result["error"] = "QBITTORRENT_URL must be an HTTP loopback URL"
+    loopback = host in {"127.0.0.1", "::1", "localhost"}
+    result = {
+        "reachable": False,
+        "status": "not-ready",
+        "message": "qBittorrent app isn't open",
+    }
+    if technical:
+        result.update({"url": raw, "loopback": loopback})
+    if not loopback or parsed.scheme != "http" or not host:
+        if technical:
+            result["error"] = "qBittorrent connection must stay on this computer"
         return result
     try:
         with socket.create_connection((host, parsed.port or 80), timeout=1):
             result["reachable"] = True
+            result["status"] = "ready"
+            result["message"] = "qBittorrent is ready"
     except OSError as exc:
-        result["error"] = str(exc)
-    result["username_set"] = bool(os.environ.get("QBITTORRENT_USERNAME"))
-    result["password_set"] = bool(os.environ.get("QBITTORRENT_PASSWORD"))
+        if getattr(exc, "errno", None) in {errno.EACCES, errno.EPERM}:
+            result["status"] = "needs-local-app-access"
+            result["message"] = "qBittorrent check needs local-app access"
+            result["retry_with_local_app_access"] = True
+        if technical:
+            result["error"] = str(exc)
+    if technical:
+        result["username_set"] = bool(os.environ.get("QBITTORRENT_USERNAME"))
+        result["password_set"] = bool(os.environ.get("QBITTORRENT_PASSWORD"))
     return result
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--technical", action="store_true", help="include connection diagnostics for setup troubleshooting")
+    args = parser.parse_args()
     movies_root, series_root = library_roots()
     report = {
         "platform": platform.platform(),
         "python": {"version": platform.python_version(), "supported": sys.version_info >= (3, 11)},
-        "commands": {name: command(name) for name in ("ffmpeg", "ffprobe", "git")},
-        "qBittorrent": qbt_endpoint(),
+        "commands": {name: command(name) for name in ("ffmpeg", "ffprobe", "git", "mkvpropedit")},
+        "qBittorrent": qbt_endpoint(args.technical),
         "subtitles": {"opensubtitles_api_key_configured": bool(os.environ.get("OPENSUBTITLES_API_KEY", "").strip())},
         "library_configuration": library_configuration(),
         "libraries": {"movies": root_status(movies_root), "series": root_status(series_root)},
     }
-    report["commands"]["sandbox-exec"] = sandbox_status()
     required_ok = (
         report["python"]["supported"]
         and report["commands"]["ffmpeg"]["available"]

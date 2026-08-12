@@ -6,11 +6,15 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import errno
 import http.cookiejar
 import json
 import os
 from pathlib import Path, PurePosixPath
+import platform
 import re
+import shutil
+import subprocess
 import sys
 import time
 import unicodedata
@@ -26,19 +30,48 @@ MAX_BYTES = 15 * GIB
 LOOPBACKS = {"127.0.0.1", "::1", "localhost"}
 EXTRA_RE = re.compile(r"(?:^|[\\/._ -])(sample|trailer|featurette|interview|deleted[ ._-]?scene|behind[ ._-]?the[ ._-]?scenes|bonus)(?:$|[\\/._ -])", re.I)
 CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+SKIP_ONLY_REASONS = {
+    "hidden payload path",
+    "dangerous or archive extension, including inner extension",
+    "unexpected extension",
+}
 
 
 class QbtError(RuntimeError):
     pass
 
 
+class QbtUnavailable(QbtError):
+    """The local qBittorrent application cannot currently be reached."""
+
+
+class QbtAccessDenied(QbtError):
+    """The host must grant this process local-app access before retrying."""
+
+
+def access_denied(exc: BaseException) -> bool:
+    """Recognize host sandbox denials without misreporting qBittorrent as closed."""
+    current: object = exc
+    for _ in range(5):
+        if isinstance(current, PermissionError) or getattr(current, "errno", None) in {
+            errno.EACCES,
+            errno.EPERM,
+        }:
+            return True
+        next_reason = getattr(current, "reason", None)
+        if next_reason is None or next_reason is current:
+            break
+        current = next_reason
+    return False
+
+
 def checked_base_url(raw: str) -> str:
     value = raw.rstrip("/")
     parsed = urlparse(value)
     if parsed.scheme != "http" or parsed.hostname not in LOOPBACKS or parsed.username or parsed.password:
-        raise QbtError("QBITTORRENT_URL must be an HTTP loopback URL without embedded credentials")
+        raise QbtError("qBittorrent needs its one-time Movies Nerd setup")
     if parsed.path not in ("", "/") or parsed.query or parsed.fragment:
-        raise QbtError("QBITTORRENT_URL must contain only scheme, loopback host, and optional port")
+        raise QbtError("qBittorrent needs its one-time Movies Nerd setup")
     return value
 
 
@@ -91,11 +124,11 @@ class QbtClient:
         self.base_url = checked_base_url(base_url)
         self.opener = build_opener(HTTPCookieProcessor(http.cookiejar.CookieJar()))
         if bool(username) != bool(password):
-            raise QbtError("set both QBITTORRENT_USERNAME and QBITTORRENT_PASSWORD")
+            raise QbtError("qBittorrent needs its one-time Movies Nerd setup")
         if username and password:
             response = self.request("auth/login", {"username": username, "password": password})
             if response.strip() != b"Ok.":
-                raise QbtError("qBittorrent authentication failed")
+                raise QbtError("qBittorrent needs its one-time Movies Nerd setup")
 
     def request(self, endpoint: str, fields: dict[str, str] | None = None, multipart_body: bool = False) -> bytes:
         url = f"{self.base_url}/api/v2/{endpoint}"
@@ -113,12 +146,16 @@ class QbtClient:
             with self.opener.open(request, timeout=8) as response:
                 return response.read(16 * 1024 * 1024)
         except HTTPError as exc:
-            detail = exc.read(1024).decode("utf-8", "replace").strip()
+            exc.read(1024)
             if exc.code == 403:
-                raise QbtError("qBittorrent rejected authentication; check Web UI credentials and IP bans") from exc
-            raise QbtError(f"qBittorrent HTTP {exc.code}: {detail or exc.reason}") from exc
-        except URLError as exc:
-            raise QbtError(f"cannot reach qBittorrent at {self.base_url}: {exc.reason}") from exc
+                raise QbtError("qBittorrent needs its one-time Movies Nerd setup") from exc
+            raise QbtError("qBittorrent couldn't complete the request. Please try again.") from exc
+        except (URLError, TimeoutError, PermissionError) as exc:
+            if access_denied(exc):
+                raise QbtAccessDenied(
+                    "local qBittorrent access needs host approval; retry this command with local-app permission"
+                ) from exc
+            raise QbtUnavailable("qBittorrent app isn't ready") from exc
 
     def json(self, endpoint: str) -> object:
         try:
@@ -139,6 +176,63 @@ def client_from_env() -> QbtClient:
         os.environ.get("QBITTORRENT_USERNAME"),
         os.environ.get("QBITTORRENT_PASSWORD"),
     )
+
+
+def launch_qbittorrent() -> bool:
+    """Open the installed qBittorrent app without a shell or extra dependency."""
+    system = platform.system()
+    try:
+        if system == "Darwin":
+            completed = subprocess.run(
+                ["/usr/bin/open", "-g", "-a", "qBittorrent"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+            )
+            return completed.returncode == 0
+
+        names = ("qbittorrent.exe", "qbittorrent") if system == "Windows" else ("qbittorrent", "qbittorrent-nox")
+        executable = next((path for name in names if (path := shutil.which(name))), None)
+        if not executable:
+            return False
+        kwargs = {
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+        }
+        if system == "Windows":
+            kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        else:
+            kwargs["start_new_session"] = True
+        subprocess.Popen([executable], **kwargs)
+        return True
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def connected_client(wait_seconds: float = 12.0, retry_interval: float = 0.5) -> QbtClient:
+    """Return a ready client, opening qBittorrent once when it is closed."""
+    try:
+        client = client_from_env()
+        client.request("app/version")
+        return client
+    except QbtUnavailable:
+        pass
+
+    if not launch_qbittorrent():
+        raise QbtUnavailable("qBittorrent app isn't open. Please open it, then try again.")
+
+    deadline = time.monotonic() + max(0.0, wait_seconds)
+    while True:
+        try:
+            client = client_from_env()
+            client.request("app/version")
+            return client
+        except QbtUnavailable:
+            if time.monotonic() >= deadline:
+                raise QbtUnavailable("qBittorrent app isn't open. Please open it, then try again.")
+            time.sleep(max(0.05, retry_interval))
 
 
 def safe_stage(kind: str) -> Path:
@@ -211,21 +305,22 @@ def classify_files(files: list[dict], series: bool = False) -> dict:
             "unsafe_reasons": reasons,
         }
         normalized.append(record)
-        if reasons:
+        hard_reasons = [reason for reason in reasons if reason not in SKIP_ONLY_REASONS]
+        record["hard_reasons"] = hard_reasons
+        if hard_reasons:
             unsafe.append(record)
         if suffix in VIDEO_EXTENSIONS and not extra and not reasons:
             videos.append(record)
     main = max(videos, key=lambda item: item["size"], default=None)
-    keep = []
-    skip = []
-    for item in normalized:
-        suffix = PurePosixPath(item["name"]).suffix.lower()
-        if item["unsafe_reasons"] or item["extra"]:
-            skip.append(item["index"])
-        elif not series and suffix in VIDEO_EXTENSIONS and main and item["index"] != main["index"]:
-            skip.append(item["index"])
-        else:
-            keep.append(item["index"])
+    selected_videos = videos if series else ([main] if main else [])
+    keep = [item["index"] for item in selected_videos]
+    skip = [item["index"] for item in normalized if item["index"] not in keep]
+    discarded = [item for item in normalized if item["index"] in skip]
+    all_safe_video_indices = [
+        item["index"] for item in normalized
+        if PurePosixPath(item["name"]).suffix.lower() in VIDEO_EXTENSIONS
+        and not item["unsafe_reasons"]
+    ]
     selected_size = sum(item["size"] for item in normalized if item["index"] in keep)
     return {
         "files": normalized,
@@ -234,6 +329,8 @@ def classify_files(files: list[dict], series: bool = False) -> dict:
         "episodes": videos if series else [],
         "keep_indices": keep,
         "skip_indices": skip,
+        "all_safe_video_indices": all_safe_video_indices,
+        "discarded_by_default": discarded,
         "selected_size": selected_size,
     }
 
@@ -275,8 +372,7 @@ def validate_torrent(client: QbtClient, torrent_hash: str, allow_oversize: bool 
 
 def command_status(client: QbtClient, _args: argparse.Namespace) -> dict:
     version = client.request("app/version").decode("utf-8", "replace").strip()
-    api = client.request("app/webapiVersion").decode("utf-8", "replace").strip()
-    return {"connected": True, "qBittorrent": version, "web_api": api, "url": client.base_url}
+    return {"ready": True, "app": "qBittorrent", "version": version}
 
 
 def command_add(client: QbtClient, args: argparse.Namespace) -> dict:
@@ -291,9 +387,14 @@ def command_add(client: QbtClient, args: argparse.Namespace) -> dict:
         stage.chmod(0o700)
     except OSError as exc:
         raise QbtError(f"cannot restrict staging permissions: {exc}") from exc
+    transfer = stage / "transfers" / torrent_hash
+    if transfer.is_symlink():
+        raise QbtError("transfer staging must not be a symlink")
+    transfer.mkdir(mode=0o700, parents=True, exist_ok=True)
+    transfer.chmod(0o700)
     fields = {
         "urls": args.magnet,
-        "savepath": str(stage),
+        "savepath": str(transfer),
         "tags": f"movies-nerd,{args.kind}",
         "paused": "true",
         "root_folder": "true",
@@ -306,7 +407,7 @@ def command_add(client: QbtClient, args: argparse.Namespace) -> dict:
     response = client.request("torrents/add", fields, multipart_body=True).decode("utf-8", "replace").strip()
     if response not in ("", "Ok."):
         raise QbtError(f"qBittorrent rejected the torrent: {response}")
-    return {"added_stopped": True, "hash": torrent_hash, "staging": str(stage), "next": "inspect metadata before start"}
+    return {"added_stopped": True, "hash": torrent_hash, "staging": str(transfer), "next": "inspect metadata before start"}
 
 
 def command_inspect(client: QbtClient, args: argparse.Namespace) -> dict:
@@ -330,6 +431,7 @@ def command_inspect(client: QbtClient, args: argparse.Namespace) -> dict:
         "main_feature": files["main_feature"],
         "episodes": files["episodes"],
         "skipped_by_default": files["skip_indices"],
+        "discarded_files": files["discarded_by_default"],
         "files": files["files"],
         "safe_to_start": True,
     }
@@ -384,15 +486,15 @@ def command_start(client: QbtClient, args: argparse.Namespace) -> dict:
     if not args.commit:
         raise QbtError("refusing to start content transfer without --commit")
     info, files = validate_torrent(client, torrent_hash, args.allow_oversize, series=args.series)
-    transfer_size = sum(item["size"] for item in files["files"]) if args.include_extras else files["selected_size"]
-    if transfer_size > MAX_BYTES and not args.allow_oversize:
-        raise QbtError(f"actual selected transfer is {format_gib(transfer_size)}, above the 15 GiB limit")
     if args.include_extras:
-        keep_indices = [item["index"] for item in files["files"]]
-        skip_indices = []
+        keep_indices = files["all_safe_video_indices"]
+        skip_indices = [item["index"] for item in files["files"] if item["index"] not in keep_indices]
     else:
         keep_indices = files["keep_indices"]
         skip_indices = files["skip_indices"]
+    transfer_size = sum(item["size"] for item in files["files"] if item["index"] in keep_indices)
+    if transfer_size > MAX_BYTES and not args.allow_oversize:
+        raise QbtError(f"actual selected transfer is {format_gib(transfer_size)}, above the 15 GiB limit")
     if keep_indices:
         client.request("torrents/filePrio", {"hash": torrent_hash, "id": "|".join(map(str, keep_indices)), "priority": "1"})
     if skip_indices:
@@ -413,6 +515,52 @@ def command_stop(client: QbtClient, args: argparse.Namespace) -> dict:
         raise QbtError("refusing to change qBittorrent state without --commit")
     client.request("torrents/stop", {"hashes": torrent_hash})
     return {"stopped": True, "hash": torrent_hash}
+
+
+def checked_movies_nerd_transfer(info: dict, torrent_hash: str) -> Path:
+    tags = {value.strip().casefold() for value in str(info.get("tags") or "").split(",")}
+    if "movies-nerd" not in tags:
+        raise QbtError("refusing to remove a torrent not owned by Movies Nerd")
+    actual = Path(str(info.get("save_path") or "")).resolve(strict=False)
+    expected = [
+        root.resolve(strict=False) / "transfers" / torrent_hash
+        for root in staging_roots()
+    ]
+    if actual not in expected:
+        raise QbtError("refusing to remove a torrent outside its exact Movies Nerd staging directory")
+    return actual
+
+
+def remove_movies_nerd_torrent(client: QbtClient, torrent_hash: str) -> dict:
+    """Remove one exact Movies Nerd torrent and its dedicated staged payload."""
+    normalized = normalize_hash(torrent_hash)
+    info = torrent_info(client, normalized)
+    transfer = checked_movies_nerd_transfer(info, normalized)
+    client.request("torrents/stop", {"hashes": normalized})
+    client.request("torrents/delete", {"hashes": normalized, "deleteFiles": "true"})
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            torrent_info(client, normalized)
+        except QbtError as exc:
+            if "not present" in str(exc):
+                break
+            raise
+        time.sleep(0.1)
+    try:
+        transfer.rmdir()
+    except (FileNotFoundError, OSError):
+        pass
+    sidecar = transfer.with_name("._" + transfer.name)
+    if sidecar.is_file() and not sidecar.is_symlink():
+        sidecar.unlink(missing_ok=True)
+    return {"removed": True, "hash": normalized, "staged_payload_removed": not transfer.exists()}
+
+
+def command_remove(client: QbtClient, args: argparse.Namespace) -> dict:
+    if not args.commit:
+        raise QbtError("refusing to remove a torrent without --commit")
+    return remove_movies_nerd_torrent(client, args.hash)
 
 
 def parser() -> argparse.ArgumentParser:
@@ -442,13 +590,16 @@ def parser() -> argparse.ArgumentParser:
     stop = sub.add_parser("stop", help="stop one torrent")
     stop.add_argument("--hash", required=True)
     stop.add_argument("--commit", action="store_true")
+    remove = sub.add_parser("remove", help="remove one exact Movies Nerd torrent and staged payload")
+    remove.add_argument("--hash", required=True)
+    remove.add_argument("--commit", action="store_true")
     return result
 
 
 def main() -> int:
     args = parser().parse_args()
     try:
-        client = client_from_env()
+        client = connected_client()
         handlers = {
             "status": command_status,
             "add-paused": command_add,
@@ -456,9 +607,17 @@ def main() -> int:
             "fetch-metadata": command_fetch_metadata,
             "start": command_start,
             "stop": command_stop,
+            "remove": command_remove,
         }
         print(json.dumps(handlers[args.command](client, args), indent=2, sort_keys=True))
         return 0
+    except QbtAccessDenied as exc:
+        print(json.dumps({
+            "error": str(exc),
+            "needs_local_app_access": True,
+            "user_action_required": False,
+        }, indent=2), file=sys.stderr)
+        return 6
     except (QbtError, ValueError) as exc:
         print(json.dumps({"error": str(exc)}, indent=2), file=sys.stderr)
         return 2

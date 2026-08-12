@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import base64
+from contextlib import redirect_stdout
+import io
 import json
 import os
 from pathlib import Path
@@ -16,12 +18,21 @@ sys.path.insert(0, str(SCRIPTS))
 import _common
 import qbittorrent_api as qbt
 import clean_clutter
+import check_environment
+import check_subtitles
+import edit_mkv_headers
+import finish_staging
+import job_manifest
+import media_probe
 import monitor_download
 import opensubtitles_api
 import payload_safety
 import rank_releases
+import race_candidates
 import remux_mkv
+import search_releases
 import select_payload
+import skill_version
 import subtitle_provider
 import validate_subtitle
 import write_nfo
@@ -43,7 +54,12 @@ class QbittorrentSafetyTests(unittest.TestCase):
         self.assertEqual(qbt.magnet_hash(f"magnet:?xt=urn:btih:{expected}"), expected)
         self.assertEqual(qbt.magnet_hash(f"magnet:?xt=urn:btih:{encoded}"), expected)
 
-    def test_payload_omits_extras_and_rejects_executable(self):
+    def test_skill_version_is_valid_semver(self):
+        version = skill_version.read_version()
+        self.assertIsNotNone(skill_version.SEMVER.fullmatch(version))
+        self.assertEqual(skill_version.label(version), f"Movies Nerd v{version}")
+
+    def test_payload_downloads_only_main_video_and_skips_companions(self):
         files = [
             {"index": 0, "name": "Movie/Movie.mkv", "size": 8_000_000_000, "priority": 1},
             {"index": 1, "name": "Movie/Featurettes/Interview.mkv", "size": 1_000_000_000, "priority": 1},
@@ -52,19 +68,33 @@ class QbittorrentSafetyTests(unittest.TestCase):
         ]
         result = qbt.classify_files(files)
         self.assertEqual(result["main_feature"]["index"], 0)
+        self.assertEqual(result["keep_indices"], [0])
         self.assertIn(1, result["skip_indices"])
-        self.assertEqual(result["unsafe"][0]["index"], 3)
+        self.assertIn(2, result["skip_indices"])
+        self.assertIn(3, result["skip_indices"])
+        self.assertEqual(result["unsafe"], [])
+        self.assertEqual(result["selected_size"], 8_000_000_000)
 
-    def test_metadata_gate_rejects_double_extensions_and_bidi_spoofing(self):
+    def test_metadata_gate_skips_suspicious_files_but_rejects_spoofing(self):
         files = [
             {"index": 0, "name": "Movie/Movie.mkv", "size": 1_000_000_000},
             {"index": 1, "name": "Movie/setup.exe.mkv", "size": 1_000_000},
             {"index": 2, "name": "Movie/\u202espoof.mkv", "size": 1_000_000},
         ]
         result = qbt.classify_files(files)
-        self.assertEqual([item["index"] for item in result["unsafe"]], [1, 2])
-        self.assertIn("inner extension", result["unsafe"][0]["unsafe_reasons"][0])
-        self.assertTrue(any("spoofing" in reason for reason in result["unsafe"][1]["unsafe_reasons"]))
+        self.assertEqual(result["keep_indices"], [0])
+        self.assertIn(1, result["skip_indices"])
+        self.assertEqual([item["index"] for item in result["unsafe"]], [2])
+        self.assertTrue(any("spoofing" in reason for reason in result["unsafe"][0]["unsafe_reasons"]))
+
+    def test_metadata_gate_rejects_traversal_even_for_skipped_file(self):
+        files = [
+            {"index": 0, "name": "Movie/Movie.mkv", "size": 1_000_000_000},
+            {"index": 1, "name": "../setup.exe", "size": 1_000_000},
+        ]
+        result = qbt.classify_files(files)
+        self.assertEqual([item["index"] for item in result["unsafe"]], [1])
+        self.assertTrue(any("traversing" in reason for reason in result["unsafe"][0]["hard_reasons"]))
 
     def test_metadata_gate_rejects_malformed_and_colliding_records(self):
         files = [
@@ -98,6 +128,98 @@ class QbittorrentSafetyTests(unittest.TestCase):
         self.assertEqual(result["keep_indices"], [0, 1])
         self.assertEqual(result["skip_indices"], [2])
 
+    def test_closed_qbittorrent_is_opened_and_retried(self):
+        class OfflineClient:
+            def request(self, _endpoint):
+                raise qbt.QbtUnavailable("not ready")
+
+        class ReadyClient:
+            def request(self, _endpoint):
+                return b"5.0.0"
+
+        with (
+            patch.object(qbt, "client_from_env", side_effect=[OfflineClient(), ReadyClient()]),
+            patch.object(qbt, "launch_qbittorrent", return_value=True) as launch,
+        ):
+            client = qbt.connected_client(wait_seconds=0)
+        self.assertIsInstance(client, ReadyClient)
+        launch.assert_called_once_with()
+
+    def test_unavailable_qbittorrent_error_is_nontechnical(self):
+        class OfflineClient:
+            def request(self, _endpoint):
+                raise qbt.QbtUnavailable("not ready")
+
+        with (
+            patch.object(qbt, "client_from_env", return_value=OfflineClient()),
+            patch.object(qbt, "launch_qbittorrent", return_value=False),
+        ):
+            with self.assertRaisesRegex(qbt.QbtUnavailable, "app isn't open") as caught:
+                qbt.connected_client(wait_seconds=0)
+        message = str(caught.exception)
+        self.assertNotIn("127.0.0.1", message)
+        self.assertNotIn("port", message.lower())
+
+    def test_local_access_denial_is_not_misreported_as_closed(self):
+        denied = __import__("urllib.error").error.URLError(PermissionError(1, "Operation not permitted"))
+        self.assertTrue(qbt.access_denied(denied))
+        self.assertFalse(qbt.access_denied(ConnectionRefusedError(61, "Connection refused")))
+
+    def test_macos_launcher_opens_qbittorrent_in_background(self):
+        completed = __import__("subprocess").CompletedProcess([], 0)
+        with (
+            patch.object(qbt.platform, "system", return_value="Darwin"),
+            patch.object(qbt.subprocess, "run", return_value=completed) as run,
+        ):
+            self.assertTrue(qbt.launch_qbittorrent())
+        self.assertEqual(run.call_args.args[0], ["/usr/bin/open", "-g", "-a", "qBittorrent"])
+
+    def test_torrent_isolated_in_its_own_transfer_directory(self):
+        class Client:
+            def __init__(self):
+                self.fields = None
+
+            def request(self, _endpoint, fields, multipart_body=False):
+                self.fields = fields
+                self.multipart_body = multipart_body
+                return b"Ok."
+
+        with tempfile.TemporaryDirectory() as raw:
+            movie_stage = Path(raw) / "Movies" / ".incoming" / "Movies Nerd"
+            series_stage = Path(raw) / "Series" / ".incoming" / "Movies Nerd"
+            client = Client()
+            args = __import__("argparse").Namespace(
+                magnet="magnet:?xt=urn:btih:" + "a" * 40,
+                kind="movie",
+                rename="Example (2024)",
+                commit=True,
+            )
+            with patch.object(qbt, "staging_roots", return_value=(movie_stage, series_stage)):
+                result = qbt.command_add(client, args)
+        self.assertTrue(result["staging"].endswith("/transfers/" + "a" * 40))
+        self.assertEqual(client.fields["savepath"], result["staging"])
+
+    def test_cleanup_refuses_unowned_or_nonisolated_torrent(self):
+        with tempfile.TemporaryDirectory() as raw:
+            stage = Path(raw) / "Movies" / ".incoming" / "Movies Nerd"
+            info_hash = "a" * 40
+            with patch.object(qbt, "staging_roots", return_value=(stage, Path(raw) / "Series")):
+                with self.assertRaisesRegex(qbt.QbtError, "not owned"):
+                    qbt.checked_movies_nerd_transfer({
+                        "tags": "movie", "save_path": str(stage / "transfers" / info_hash),
+                    }, info_hash)
+                with self.assertRaisesRegex(qbt.QbtError, "exact"):
+                    qbt.checked_movies_nerd_transfer({
+                        "tags": "movies-nerd", "save_path": str(stage),
+                    }, info_hash)
+
+    def test_routine_environment_check_hides_connection_details(self):
+        with patch.object(check_environment.socket, "create_connection", side_effect=OSError("refused")):
+            status = check_environment.qbt_endpoint()
+        self.assertEqual(status["message"], "qBittorrent app isn't open")
+        self.assertNotIn("url", status)
+        self.assertNotIn("error", status)
+
 
 class PolicyTests(unittest.TestCase):
     def test_library_roots_default_to_documents(self):
@@ -114,6 +236,15 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(movies, Path("/private/tmp/media/Movies"))
         self.assertEqual(series, Path("/private/tmp/media/Series"))
 
+    def test_movie_root_does_not_need_to_be_named_movies(self):
+        env = {
+            _common.MOVIES_ROOT_ENV: "/Volumes/ssd/Films",
+            _common.SERIES_ROOT_ENV: "/Volumes/ssd/Series",
+        }
+        movies, series = _common.library_roots(env)
+        self.assertEqual(movies, Path("/Volumes/ssd/Films"))
+        self.assertEqual(series, Path("/Volumes/ssd/Series"))
+
     def test_library_roots_reject_nested_paths(self):
         env = {
             _common.MOVIES_ROOT_ENV: "/private/tmp/media",
@@ -121,6 +252,111 @@ class PolicyTests(unittest.TestCase):
         }
         with self.assertRaises(ValueError):
             _common.library_roots(env)
+
+    def test_job_manifest_is_private_atomic_and_resumable(self):
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            env = {
+                _common.MOVIES_ROOT_ENV: str(base / "Movies"),
+                _common.SERIES_ROOT_ENV: str(base / "Series"),
+            }
+            path = job_manifest.create_job(
+                "movie", "Example", 2024,
+                {"release": {"magnet": "magnet:?xt=urn:btih:" + "a" * 40}},
+                env,
+            )
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            updated = job_manifest.update_job(
+                path,
+                {"state": "downloading", "steps": {"search": "complete", "transfer": "running"}},
+                env,
+            )
+            self.assertEqual(updated["state"], "downloading")
+            self.assertEqual(updated["steps"]["confirmation"], "pending")
+            _, loaded = job_manifest.load_job(path, env)
+            self.assertEqual(loaded["steps"]["search"], "complete")
+            self.assertEqual(job_manifest.redacted(loaded)["release"]["magnet"], "<stored>")
+
+    def test_job_manifest_rejects_credentials_and_outside_paths(self):
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            env = {
+                _common.MOVIES_ROOT_ENV: str(base / "Movies"),
+                _common.SERIES_ROOT_ENV: str(base / "Series"),
+            }
+            with self.assertRaises(job_manifest.ManifestError):
+                job_manifest.create_job("movie", "Example", 2024, {"api_key": "secret"}, env)
+            outside = base / "outside.json"
+            outside.write_text("{}", encoding="utf-8")
+            with self.assertRaises(job_manifest.ManifestError):
+                job_manifest.load_job(outside, env)
+
+    def test_job_manifest_records_primary_and_backup_search_results(self):
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            env = {
+                _common.MOVIES_ROOT_ENV: str(base / "Movies"),
+                _common.SERIES_ROOT_ENV: str(base / "Series"),
+            }
+            job = job_manifest.create_job("movie", "Example", 2024, environ=env)
+            primary = {
+                "title": "Example 2024 1080p x265", "source": "1337x",
+                "provider": "Knaben API", "size_bytes": 2_000_000_000,
+                "size": "1.86 GiB", "resolution": "1080p", "seeders": 30,
+                "leechers": 2, "score": 350, "warnings": [],
+                "magnet": search_releases.minimal_magnet("a" * 40, "Primary"),
+            }
+            backup = {
+                **primary,
+                "source": "The Pirate Bay",
+                "provider": "APIBay",
+                "magnet": search_releases.minimal_magnet("b" * 40, "Backup"),
+            }
+            result = base / "search.json"
+            result.write_text(json.dumps({
+                "query": "Example 2024",
+                "request": {"title": "Example", "year": 2024, "kind": "movie"},
+                "elapsed_ms": 800,
+                "usable_results": 2,
+                "selection": {"primary": primary, "backup": backup, "eligible_count": 2},
+            }), encoding="utf-8")
+            recorded = job_manifest.record_search(job, result, env)
+            self.assertEqual(recorded["steps"]["search"], "complete")
+            self.assertEqual(recorded["backup_release"]["source"], "The Pirate Bay")
+            self.assertEqual(len(recorded["candidate_pool"]), 2)
+            self.assertEqual(job_manifest.redacted(recorded)["backup_release"]["magnet"], "<stored>")
+
+    def test_job_transitions_keep_steps_consistent(self):
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            env = {
+                _common.MOVIES_ROOT_ENV: str(base / "Movies"),
+                _common.SERIES_ROOT_ENV: str(base / "Series"),
+            }
+            job = job_manifest.create_job("movie", "Example", 2024, environ=env)
+            confirmed = job_manifest.transition_job(job, "confirmed", environ=env)
+            self.assertEqual(confirmed["steps"]["confirmation"], "complete")
+            metadata = job_manifest.transition_job(job, "metadata-started", environ=env)
+            self.assertEqual(metadata["steps"]["metadata_gate"], "running")
+            failed = job_manifest.transition_job(
+                job, "metadata-failed", reason="no metadata", environ=env,
+            )
+            self.assertEqual(failed["state"], "failed")
+            self.assertEqual(failed["steps"]["transfer"], "skipped")
+
+    def test_failed_job_is_archived_outside_incoming(self):
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            env = {
+                _common.MOVIES_ROOT_ENV: str(base / "Movies"),
+                _common.SERIES_ROOT_ENV: str(base / "Series"),
+            }
+            job = job_manifest.create_job("movie", "Example", 2024, environ=env)
+            job_manifest.transition_job(job, "failed", reason="test", environ=env)
+            result = job_manifest.archive_failed_job(job, environ=env)
+            self.assertFalse(job.exists())
+            self.assertNotIn("/.incoming/", result["to"])
+            self.assertTrue(Path(result["to"]).is_file())
 
     def test_rank_prefers_eligible_4k_then_1080p(self):
         candidates = [
@@ -144,6 +380,236 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(ranked[0]["size_efficiency"]["rating"], "balanced")
         self.assertEqual(ranked[1]["size_efficiency"]["rating"], "bloated")
         self.assertTrue(any("large for its runtime" in warning for warning in ranked[1]["warnings"]))
+
+    def test_knaben_results_are_normalized_and_magnets_sanitized(self):
+        payload = {
+            "hits": [{
+                "title": "Example 2024 1080p x265",
+                "bytes": 2_500_000_000,
+                "seeders": 40,
+                "peers": 5,
+                "tracker": "1337x",
+                "hash": "a" * 40,
+                "magnetUrl": "magnet:?xt=urn:btih:" + "a" * 40 + "&ws=file:///tmp/bad",
+            }]
+        }
+        result = search_releases.normalize_knaben(payload)[0]
+        self.assertEqual(result["source"], "1337x")
+        self.assertEqual(result["leechers"], 5)
+        self.assertNotIn("ws=", result["magnet"])
+        self.assertEqual(search_releases.magnet_hash(result["magnet"]), "a" * 40)
+
+    def test_apibay_results_are_normalized_without_extra_trackers(self):
+        payload = [{
+            "name": "Example 2024 2160p HEVC",
+            "size": "12000000000",
+            "seeders": "25",
+            "leechers": "3",
+            "info_hash": "b" * 40,
+        }]
+        result = search_releases.normalize_apibay(payload)[0]
+        self.assertEqual(result["provider"], "APIBay")
+        self.assertEqual(result["seeders"], 25)
+        self.assertNotIn("&tr=", result["magnet"])
+
+    def test_yts_and_magnetz_api_results_are_normalized(self):
+        yts = search_releases.normalize_yts({
+            "status": "ok",
+            "data": {"movies": [{
+                "title": "Example", "year": 2024,
+                "torrents": [{
+                    "hash": "d" * 40, "quality": "1080p", "type": "bluray",
+                    "video_codec": "x265", "size_bytes": 2_000_000_000,
+                    "seeds": 9, "peers": 2,
+                }],
+            }]},
+        })[0]
+        magnetz = search_releases.normalize_magnetz({
+            "data": [{
+                "name": "Example 2024 1080p x265", "info_hash": "e" * 40,
+                "size": 1_900_000_000, "seeders": 7, "leechers": 1,
+            }],
+        })[0]
+        self.assertEqual(yts["provider"], "YTS API")
+        self.assertEqual(yts["seeders"], 9)
+        self.assertEqual(magnetz["provider"], "Magnetz API")
+        self.assertEqual(magnetz["seeders"], 7)
+
+    def test_candidate_race_keeps_same_quality_and_size_ceiling(self):
+        candidates = [
+            {
+                "title": "Example 2024 1080p x265 primary", "size": 2_000_000_000,
+                "seeders": 30, "source": "one",
+                "magnet": search_releases.minimal_magnet("1" * 40, "Primary"),
+            },
+            {
+                "title": "Example 2024 1080p x265 smaller", "size": 1_800_000_000,
+                "seeders": 20, "source": "two",
+                "magnet": search_releases.minimal_magnet("2" * 40, "Smaller"),
+            },
+            {
+                "title": "Example 2024 720p x264", "size": 1_000_000_000,
+                "seeders": 50, "source": "three",
+                "magnet": search_releases.minimal_magnet("3" * 40, "Lower quality"),
+            },
+            {
+                "title": "Example 2024 1080p x265 larger", "size": 3_000_000_000,
+                "seeders": 10, "source": "four",
+                "magnet": search_releases.minimal_magnet("4" * 40, "Larger"),
+            },
+        ]
+        selection = search_releases.release_selection(
+            candidates, "Example", 2024, 15 * qbt.GIB, 90,
+        )
+        self.assertEqual(len(selection["candidates"]), 2)
+        self.assertTrue(all(item["resolution"] == "1080p" for item in selection["candidates"]))
+        self.assertTrue(all(
+            item["size_bytes"] <= selection["primary"]["size_bytes"]
+            for item in selection["candidates"]
+        ))
+
+    def test_hidden_race_starts_one_winner_and_removes_loser(self):
+        candidates = [
+            {
+                "title": "Example 2024 1080p x265", "source": "one",
+                "provider": "one", "size_bytes": 2_000_000_000,
+                "size": "1.86 GiB", "resolution": "1080p", "seeders": 10,
+                "leechers": 1, "score": 100, "warnings": [],
+                "magnet": search_releases.minimal_magnet("a" * 40, "One"),
+            },
+            {
+                "title": "Example 2024 1080p x265", "source": "two",
+                "provider": "two", "size_bytes": 1_900_000_000,
+                "size": "1.77 GiB", "resolution": "1080p", "seeders": 8,
+                "leechers": 1, "score": 200, "warnings": [],
+                "magnet": search_releases.minimal_magnet("b" * 40, "Two"),
+            },
+        ]
+
+        class Client:
+            def request(self, *_args, **_kwargs):
+                return b"Ok."
+
+        removed = []
+        with (
+            patch.object(race_candidates, "command_add"),
+            patch.object(race_candidates, "torrent_files", return_value=[{"name": "Example.mkv"}]),
+            patch.object(race_candidates, "validate_torrent", return_value=({"state": "metaDL"}, {})),
+            patch.object(race_candidates, "health_key", side_effect=lambda _client, item: (item["score"],)),
+            patch.object(race_candidates, "remove_movies_nerd_torrent", side_effect=lambda _client, value: removed.append(value)),
+            patch.object(race_candidates, "command_start", return_value={"started": True, "hash": "b" * 40}),
+        ):
+            winner, result = race_candidates.race(Client(), candidates, "movie", "Example (2024)", 15, 0)
+        self.assertEqual(winner["source"], "two")
+        self.assertEqual(removed, ["a" * 40])
+        self.assertTrue(result["started"])
+
+    def test_api_search_deduplicates_by_info_hash(self):
+        first = {
+            "title": "Example 1080p x265", "size": 2_000_000_000,
+            "seeders": 10, "magnet": search_releases.minimal_magnet("c" * 40, "Example"),
+        }
+        second = {**first, "seeders": 50, "source": "faster"}
+        result = search_releases.deduplicate([first, second])
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["seeders"], 50)
+
+    def test_exact_title_match_requires_requested_year(self):
+        self.assertTrue(search_releases.matches_requested_title(
+            "Amelie 2001 1080p BluRay x265", "Amélie", 2001,
+        ))
+        self.assertFalse(search_releases.matches_requested_title(
+            "Amelie 2014 1080p BluRay x265", "Amélie", 2001,
+        ))
+
+    def test_fast_api_success_skips_qbittorrent_search(self):
+        candidates = [
+            {
+                "title": f"Example 2024 1080p x265 release {index}",
+                "size": 2_000_000_000,
+                "seeders": 20,
+                "source": f"source-{index}",
+                "magnet": search_releases.minimal_magnet(str(index) * 40, "Example"),
+            }
+            for index in range(1, 4)
+        ]
+        with (
+            patch.object(search_releases, "search_knaben", return_value=candidates),
+            patch.object(search_releases, "search_apibay", return_value=[]),
+            patch.object(search_releases, "search_qbt") as qbt_search,
+        ):
+            results, reports, early = search_releases.search_all(
+                "Example 2024", 5, False, True,
+                title="Example", year=2024, max_bytes=15 * qbt.GIB,
+                runtime_minutes=90,
+            )
+        self.assertEqual(len(results), 3)
+        self.assertTrue(early)
+        self.assertEqual(
+            reports["qbt_torznab"]["skipped"],
+            "enough exact healthy API results with a different-source backup",
+        )
+        qbt_search.assert_not_called()
+
+    def test_qbittorrent_search_runs_when_fast_results_are_insufficient(self):
+        one = {
+            "title": "Example 2024 1080p x265",
+            "size": 2_000_000_000,
+            "seeders": 20,
+            "magnet": search_releases.minimal_magnet("1" * 40, "Example"),
+        }
+        with (
+            patch.object(search_releases, "search_knaben", return_value=[one]),
+            patch.object(search_releases, "search_apibay", return_value=[]),
+            patch.object(search_releases, "search_qbt", return_value=[]) as qbt_search,
+        ):
+            _, _, early = search_releases.search_all(
+                "Example 2024", 5, False, True,
+                title="Example", year=2024, max_bytes=15 * qbt.GIB,
+                runtime_minutes=90,
+            )
+        self.assertFalse(early)
+        qbt_search.assert_called_once()
+
+    def test_search_prepares_backup_from_a_different_source(self):
+        candidates = [
+            {
+                "title": "Example 2024 2160p HEVC",
+                "size": 10_000_000_000,
+                "seeders": 30,
+                "source": "1337x",
+                "provider": "Knaben API",
+                "magnet": search_releases.minimal_magnet("a" * 40, "Primary"),
+            },
+            {
+                "title": "Example 2024 2160p HEVC alternate",
+                "size": 11_000_000_000,
+                "seeders": 20,
+                "source": "1337x",
+                "provider": "Knaben API",
+                "magnet": search_releases.minimal_magnet("b" * 40, "Same source"),
+            },
+            {
+                "title": "Example 2024 1080p x265",
+                "size": 2_500_000_000,
+                "seeders": 15,
+                "source": "The Pirate Bay",
+                "provider": "APIBay",
+                "magnet": search_releases.minimal_magnet("c" * 40, "Backup"),
+            },
+        ]
+        selection = search_releases.release_selection(
+            candidates, "Example", 2024, 15 * qbt.GIB, 90,
+        )
+        self.assertEqual(
+            {selection["primary"]["source"], selection["backup"]["source"]},
+            {"1337x", "The Pirate Bay"},
+        )
+        self.assertNotEqual(selection["primary"]["source"], selection["backup"]["source"])
+        self.assertNotEqual(
+            search_releases.magnet_hash(selection["primary"]["magnet"]),
+            search_releases.magnet_hash(selection["backup"]["magnet"]),
+        )
 
     def test_nfo_escapes_untrusted_text(self):
         payload = write_nfo.render("movie", {"title": "A & B <C>", "year": 2024})
@@ -169,6 +635,101 @@ class PolicyTests(unittest.TestCase):
         self.assertTrue(report["stalled"])
         self.assertEqual(report["failover"]["exclude_source"], "source.example")
 
+    def test_monitor_marks_finished_transfer_complete(self):
+        report = monitor_download.assess({
+            "hash": "0" * 40,
+            "name": "Example",
+            "state": "uploading",
+            "progress": 1.0,
+            "dlspeed": 0,
+        }, threshold=1200, source="source.example")
+        self.assertTrue(report["complete"])
+        self.assertFalse(report["stalled"])
+
+    def test_monitor_window_exit_requires_continuation(self):
+        current = {
+            "hash": "0" * 40,
+            "name": "Example",
+            "state": "downloading",
+            "progress": 0.5,
+            "dlspeed": 1_000_000,
+        }
+        argv = [
+            "monitor_download.py", "--hash", "0" * 40,
+            "--source", "source.example", "--watch-minutes", "0",
+        ]
+        output = io.StringIO()
+        with (
+            patch.object(sys, "argv", argv),
+            patch.object(monitor_download, "connected_client", return_value=object()),
+            patch.object(monitor_download, "sync_torrent", return_value=(1, current)),
+            redirect_stdout(output),
+        ):
+            result = monitor_download.main()
+        report = json.loads(output.getvalue())
+        self.assertEqual(result, monitor_download.CONTINUE_MONITORING)
+        self.assertEqual(report["monitoring"], "continue")
+        self.assertIn("do not end", report["next"])
+
+    def test_monitor_merges_incremental_qbittorrent_updates(self):
+        class Client:
+            def __init__(self):
+                self.responses = [
+                    {
+                        "rid": 1,
+                        "full_update": True,
+                        "torrents": {
+                            "a" * 40: {
+                                "hash": "a" * 40,
+                                "name": "Example",
+                                "state": "downloading",
+                                "progress": 0.2,
+                                "dlspeed": 1_000_000,
+                                "num_seeds": 10,
+                            },
+                        },
+                    },
+                    {
+                        "rid": 2,
+                        "full_update": False,
+                        "torrents": {"a" * 40: {"progress": 0.4, "dlspeed": 2_000_000}},
+                    },
+                ]
+
+            def json(self, path):
+                return self.responses.pop(0)
+
+        client = Client()
+        rid, current = monitor_download.sync_torrent(client, "a" * 40)
+        rid, current = monitor_download.sync_torrent(client, "a" * 40, rid, current)
+        self.assertEqual(rid, 2)
+        self.assertEqual(current["progress"], 0.4)
+        self.assertEqual(current["state"], "downloading")
+        self.assertEqual(current["num_seeds"], 10)
+
+    def test_monitor_uses_fast_polling_when_transfer_is_inactive(self):
+        self.assertEqual(
+            monitor_download.next_poll_interval({"download_speed": 0, "state": "stalledDL"}, 60),
+            15,
+        )
+        self.assertEqual(
+            monitor_download.next_poll_interval({"download_speed": 1, "state": "downloading"}, 60),
+            60,
+        )
+
+    def test_monitor_surfaces_prepared_backup_without_magnet(self):
+        candidate = monitor_download.backup_candidate({
+            "backup_release": {
+                "title": "Example 2024 1080p x265",
+                "source": "The Pirate Bay",
+                "size": "2.20 GiB",
+                "seeders": 25,
+                "magnet": "magnet:?xt=urn:btih:" + "a" * 40,
+            },
+        }, "1337x")
+        self.assertEqual(candidate["source"], "The Pirate Bay")
+        self.assertNotIn("magnet", candidate)
+
     def test_clutter_finder_detects_portuguese_and_apple_files(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -177,6 +738,49 @@ class PolicyTests(unittest.TestCase):
             (root / "Film.en.srt").write_text("subtitle", encoding="utf-8")
             names = [path.name for path in clean_clutter.targets(root)]
             self.assertEqual(names, [".DS_Store", "Film.pt.srt"])
+
+    def test_finished_job_leaves_incoming_recoverably(self):
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            movies = base / "Movies"
+            series = base / "Series"
+            stage = movies / ".incoming" / "Movies Nerd"
+            source = stage / "transfers" / ("a" * 40)
+            source.mkdir(parents=True)
+            (source / "junk.nfo").write_bytes(b"untrusted")
+            sidecar = source.with_name("._" + source.name)
+            sidecar.write_bytes(b"AppleDouble")
+            final = movies / "Director" / "Example (2024)"
+            final.mkdir(parents=True)
+            (final / "Example (2024) [1080p].mkv").write_bytes(b"video")
+            (final / "Example (2024) [1080p].nfo").write_text("<movie/>", encoding="utf-8")
+            (final / "Example (2024).png").write_bytes(b"image")
+            with (
+                patch.object(finish_staging, "library_roots", return_value=(movies, series)),
+                patch.object(
+                    finish_staging, "staging_roots",
+                    return_value=(stage, series / ".incoming" / "Movies Nerd"),
+                ),
+            ):
+                library, fixed_stage = finish_staging.library_for(final)
+                checked = finish_staging.checked_targets([source], fixed_stage)
+                quarantine, moved = finish_staging.quarantine_targets(checked, fixed_stage, library)
+            self.assertFalse(source.exists())
+            self.assertFalse(sidecar.exists())
+            self.assertEqual(len(moved), 2)
+            self.assertTrue(quarantine.is_dir())
+            self.assertTrue((quarantine / "transfers" / ("a" * 40) / "junk.nfo").is_file())
+            self.assertTrue(Path(moved[0]["from"]).name.startswith("._"))
+
+    def test_finished_job_verification_ignores_macos_sidecars(self):
+        with tempfile.TemporaryDirectory() as raw:
+            final = Path(raw) / "Example (2024)"
+            final.mkdir()
+            (final / "._Example (2024) [1080p].mkv").write_bytes(b"AppleDouble")
+            (final / "._Example (2024) [1080p].nfo").write_bytes(b"AppleDouble")
+            (final / "._Example (2024).png").write_bytes(b"AppleDouble")
+            with self.assertRaisesRegex(ValueError, "not fully organized"):
+                finish_staging.verify_final_destination(final)
 
     def test_subtitle_provider_asks_once_then_falls_back(self):
         ask = subtitle_provider.plan("Example", 2024, "Example.2024.1080p", ["en", "fr"], False, {})
@@ -206,6 +810,94 @@ class PolicyTests(unittest.TestCase):
             self.assertFalse(report["safe_to_continue"])
             self.assertEqual(len(report["hazards"]), 2)
 
+    def test_content_gate_salvages_verified_video_and_leaves_bad_companions(self):
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            movie_stage = base / "Movies" / ".incoming" / "Movies Nerd"
+            series_stage = base / "Series" / ".incoming" / "Movies Nerd"
+            source = movie_stage / "transfers" / ("a" * 40)
+            source.mkdir(parents=True)
+            video = source / "Example.mkv"
+            video.write_bytes(b"verified fixture")
+            (source / "bad.nfo").write_bytes(b"bad\x00data")
+
+            def fake_probe(path):
+                return {
+                    "schema": media_probe.SCHEMA,
+                    "media": str(path.resolve()),
+                    "snapshot": media_probe.snapshot(path),
+                    "ffprobe": {"streams": [], "format": {}},
+                    "summary": {
+                        "valid_media": True, "duration_seconds": 5400.0,
+                        "width": 1920, "height": 1080, "video_codec": "h264",
+                        "stream_count": 2, "chapter_count": 0,
+                    },
+                }
+
+            clean = movie_stage / "clean" / ("a" * 40)
+            with (
+                patch.object(select_payload, "probe_media", side_effect=fake_probe),
+                patch.object(select_payload, "staging_roots", return_value=(movie_stage, series_stage)),
+            ):
+                report = select_payload.scan_payload(source)
+                result = select_payload.extract_selected(source.resolve(), clean, report)
+            self.assertTrue(report["safe_to_extract_selected"])
+            self.assertFalse(report["safe_to_continue"])
+            self.assertTrue(report["cleanup_required"])
+            self.assertTrue((clean / "Example.mkv").is_file())
+            self.assertTrue((source / "bad.nfo").is_file())
+            self.assertFalse((source / "Example.mkv").exists())
+            self.assertTrue(result["verification"]["safe_to_extract_selected"])
+
+    def test_saved_media_probe_is_reused_for_subtitle_coverage(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            media = root / "Example.mkv"
+            media.write_bytes(b"safe fixture")
+            info = media_probe.clean_probe({
+                "streams": [
+                    {"index": 0, "codec_type": "video", "codec_name": "h264", "width": 1920, "height": 1080},
+                    {"index": 1, "codec_type": "subtitle", "codec_name": "subrip", "tags": {"language": "eng", "title": "English"}},
+                ],
+                "chapters": [],
+                "format": {"format_name": "matroska,webm", "duration": "5400.0", "size": "12"},
+            })
+            report = {
+                "schema": media_probe.SCHEMA,
+                "media": str(media.resolve()),
+                "snapshot": media_probe.snapshot(media),
+                "ffprobe": info,
+                "summary": media_probe.summary(info),
+            }
+            gate = root / "gate.json"
+            gate.write_text(json.dumps({"selected": [{"path": media.name, "probe": report}]}), encoding="utf-8")
+            loaded = media_probe.load_report(gate, media)
+            embedded = check_subtitles.embedded_languages(media, loaded)
+            self.assertEqual(embedded[0]["language"], "eng")
+            self.assertEqual(loaded["summary"]["duration_seconds"], 5400.0)
+
+    def test_saved_media_probe_rejects_changed_media(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            media = root / "Example.mkv"
+            media.write_bytes(b"first")
+            info = media_probe.clean_probe({
+                "streams": [{"index": 0, "codec_type": "video", "codec_name": "h264", "width": 1920, "height": 1080}],
+                "format": {"format_name": "matroska,webm", "duration": "90"},
+            })
+            report = {
+                "schema": media_probe.SCHEMA,
+                "media": str(media.resolve()),
+                "snapshot": media_probe.snapshot(media),
+                "ffprobe": info,
+                "summary": media_probe.summary(info),
+            }
+            saved = root / "probe.json"
+            saved.write_text(json.dumps(report), encoding="utf-8")
+            media.write_bytes(b"changed")
+            with self.assertRaises(media_probe.ProbeError):
+                media_probe.load_report(saved, media)
+
     def test_valid_srt_and_html_rejection(self):
         cues = "\n\n".join(
             f"{index}\n00:00:{index:02d},000 --> 00:00:{index:02d},800\nLine {index}."
@@ -227,6 +919,49 @@ class PolicyTests(unittest.TestCase):
         }
         self.assertEqual(remux_mkv.stream_signature(info), remux_mkv.stream_signature(info.copy()))
         self.assertEqual(remux_mkv.duration(info), 5400.125)
+
+    def test_mkv_header_plan_avoids_full_remux_for_track_metadata(self):
+        info = {
+            "streams": [
+                {
+                    "index": 1, "codec_type": "audio", "codec_name": "aac",
+                    "tags": {"language": "en", "title": "Track 1"},
+                    "disposition": {"default": 0},
+                },
+                {
+                    "index": 2, "codec_type": "subtitle", "codec_name": "subrip",
+                    "tags": {"language": "fr", "title": "French"},
+                    "disposition": {"default": 1, "forced": 0, "hearing_impaired": 0},
+                },
+            ],
+            "chapters": [],
+            "format": {"format_name": "matroska,webm", "duration": "5400"},
+        }
+        changes = edit_mkv_headers.change_plan(info, {}, {})
+        self.assertEqual([item["selector"] for item in changes], ["track:a1", "track:s1"])
+        self.assertEqual(changes[0]["properties"]["language"], "eng")
+        self.assertEqual(changes[0]["properties"]["name"], "English")
+        self.assertEqual(changes[0]["properties"]["flag-default"], 1)
+        self.assertEqual(changes[1]["properties"]["flag-default"], 0)
+
+    def test_compliant_mkv_headers_need_no_edit(self):
+        info = {
+            "streams": [
+                {
+                    "index": 1, "codec_type": "audio", "codec_name": "aac",
+                    "tags": {"language": "eng", "title": "English"},
+                    "disposition": {"default": 1},
+                },
+                {
+                    "index": 2, "codec_type": "subtitle", "codec_name": "subrip",
+                    "tags": {"language": "fre", "title": "French"},
+                    "disposition": {"default": 0, "forced": 0, "hearing_impaired": 0},
+                },
+            ],
+            "chapters": [],
+            "format": {"format_name": "matroska,webm", "duration": "5400"},
+        }
+        self.assertEqual(edit_mkv_headers.change_plan(info, {}, {}), [])
 
     def test_opensubtitles_requires_environment_key(self):
         with self.assertRaises(opensubtitles_api.SubtitleApiError):

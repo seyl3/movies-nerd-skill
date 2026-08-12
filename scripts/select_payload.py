@@ -8,8 +8,10 @@ import json
 import os
 import re
 import stat
-import subprocess
 from pathlib import Path
+
+from _common import staging_roots
+from media_probe import ProbeError, probe_media, snapshot
 
 from payload_safety import (
     ALLOWED_COMPANIONS,
@@ -25,43 +27,6 @@ EXTRA_PATTERN = re.compile(
     r"behind[ ._-]*the[ ._-]*scenes|deleted[ ._-]*scene|making[ ._-]*of)(?:$|[ ._\-/])",
     re.I,
 )
-
-
-def probe(path: Path) -> dict:
-    try:
-        result = subprocess.run(
-            [
-                "ffprobe", "-v", "error", "-select_streams", "v:0",
-                "-show_entries", "format=duration:stream=width,height,codec_name",
-                "-of", "json", str(path),
-            ],
-            check=False,
-            text=True,
-            capture_output=True,
-            timeout=60,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return {"valid_media": False, "probe_error": str(exc)[:500]}
-    if result.returncode != 0:
-        return {"valid_media": False, "probe_error": result.stderr.strip()[:500]}
-    try:
-        data = json.loads(result.stdout)
-    except json.JSONDecodeError:
-        return {"valid_media": False, "probe_error": "ffprobe returned invalid JSON"}
-    stream = (data.get("streams") or [{}])[0]
-    try:
-        duration = float((data.get("format") or {}).get("duration") or 0)
-    except (TypeError, ValueError):
-        duration = 0
-    return {
-        "valid_media": bool(
-            stream.get("width") and stream.get("height") and stream.get("codec_name") and duration > 0
-        ),
-        "duration_seconds": round(duration, 3),
-        "width": stream.get("width"),
-        "height": stream.get("height"),
-        "video_codec": stream.get("codec_name"),
-    }
 
 
 def payload_paths(root: Path):
@@ -91,6 +56,7 @@ def scan_payload(root: Path, series: bool = False) -> dict:
     checked_files = 0
     checked_entries = 0
     validated_companions = 0
+    companions = []
 
     for path, walk_error in payload_paths(root):
         relative = str(path.relative_to(root))
@@ -144,21 +110,12 @@ def scan_payload(root: Path, series: bool = False) -> dict:
                 "bytes": before_probe.st_size,
                 "looks_like_extra": bool(EXTRA_PATTERN.search(relative)),
             }
-            item.update(probe(path))
             try:
-                after_probe = path.stat(follow_symlinks=False)
-            except OSError as exc:
-                hazards.append({"path": relative, "reason": f"cannot inspect media after probe: {exc}"})
-                continue
-            before_identity = (
-                before_probe.st_dev, before_probe.st_ino, before_probe.st_size, before_probe.st_mtime_ns
-            )
-            after_identity = (
-                after_probe.st_dev, after_probe.st_ino, after_probe.st_size, after_probe.st_mtime_ns
-            )
-            if before_identity != after_identity:
-                hazards.append({"path": relative, "reason": "media changed during probe"})
-                continue
+                full_probe = probe_media(path)
+                item["probe"] = full_probe
+                item.update(full_probe["summary"])
+            except (OSError, ProbeError) as exc:
+                item.update({"valid_media": False, "probe_error": str(exc)[:500]})
             if not item.get("valid_media"):
                 hazards.append({
                     "path": relative,
@@ -169,6 +126,7 @@ def scan_payload(root: Path, series: bool = False) -> dict:
             entries.append(item)
         elif suffix in ALLOWED_COMPANIONS:
             validated_companions += 1
+            companions.append({"path": relative, "reason": "replace release companion with trusted library sidecar"})
 
     valid = [item for item in entries if item.get("valid_media")]
     if series:
@@ -181,6 +139,10 @@ def scan_payload(root: Path, series: bool = False) -> dict:
         selected = [max(candidates, key=lambda item: (item.get("duration_seconds", 0), item["bytes"]))] if candidates else []
     selected_paths = {item["path"] for item in selected}
     extras = [item for item in valid if item["path"] not in selected_paths]
+    discardable = list(hazards) + companions + [
+        {"path": item["path"], "reason": "non-main video or extra"}
+        for item in extras
+    ]
     return {
         "payload": str(root),
         "mode": "series" if series else "movie",
@@ -193,22 +155,99 @@ def scan_payload(root: Path, series: bool = False) -> dict:
         "selected": selected,
         "extras_skipped_by_default": extras,
         "hazards": hazards,
-        "safe_to_continue": bool(selected) and not hazards,
+        "discardable_items": discardable,
+        "cleanup_required": bool(discardable),
+        "safe_to_extract_selected": bool(selected),
+        "safe_to_continue": bool(selected) and not discardable,
     }
+
+
+def containing_stage(path: Path) -> Path:
+    resolved = path.resolve(strict=True)
+    for stage in staging_roots():
+        fixed = stage.resolve(strict=False)
+        if resolved != fixed and fixed in resolved.parents:
+            return fixed
+    raise ValueError("payload must be a job-specific path inside Movies Nerd staging")
+
+
+def clean_destination(raw: Path, source: Path, stage: Path) -> Path:
+    if not raw.is_absolute():
+        raise ValueError("clean staging destination must be an absolute path")
+    if raw.is_symlink() or raw.exists():
+        raise ValueError("clean staging destination must not already exist")
+    resolved = raw.resolve(strict=False)
+    if resolved == stage or stage not in resolved.parents:
+        raise ValueError("clean staging destination must stay inside the same Movies Nerd staging root")
+    if resolved == source or source in resolved.parents or resolved in source.parents:
+        raise ValueError("clean staging destination must be separate from the release payload")
+    return resolved
+
+
+def extract_selected(root: Path, output: Path, report: dict, series: bool = False) -> dict:
+    """Move only verified selected media into a new clean staging directory."""
+    if not report.get("selected"):
+        raise ValueError("no verified main media is available to clean")
+    stage = containing_stage(root)
+    clean = clean_destination(output, root, stage)
+    clean.mkdir(mode=0o700, parents=True, exist_ok=False)
+    moved: list[tuple[Path, Path]] = []
+    try:
+        for item in report["selected"]:
+            relative = Path(item["path"])
+            source = (root / relative).resolve(strict=True)
+            if source.is_symlink() or root not in source.parents or not source.is_file():
+                raise ValueError("selected media changed before clean extraction")
+            saved_snapshot = item.get("probe", {}).get("snapshot")
+            if not saved_snapshot or snapshot(source) != saved_snapshot:
+                raise ValueError("selected media changed before clean extraction")
+            destination = clean / relative
+            destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            if destination.exists() or destination.is_symlink():
+                raise ValueError("clean staging destination collision")
+            os.replace(source, destination)
+            moved.append((source, destination))
+        verified = scan_payload(clean, series)
+        if not verified["safe_to_extract_selected"]:
+            raise ValueError("cleaned media did not pass verification")
+        return {
+            "clean_payload": str(clean),
+            "moved_media": [str(destination.relative_to(clean)) for _, destination in moved],
+            "verification": verified,
+        }
+    except (OSError, ValueError):
+        for source, destination in reversed(moved):
+            if destination.exists() and not source.exists():
+                source.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                os.replace(destination, source)
+        raise
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("payload", type=Path)
     parser.add_argument("--series", action="store_true", help="treat all episode-like media as main content")
+    parser.add_argument("--clean-dir", type=Path, help="new staging directory that will receive only verified media")
+    parser.add_argument("--commit", action="store_true", help="move verified media into --clean-dir")
     args = parser.parse_args()
+    if args.commit != bool(args.clean_dir):
+        parser.error("use --clean-dir and --commit together")
     if args.payload.is_symlink():
         parser.error("payload root must not be a symlink")
     root = args.payload.resolve(strict=True)
     if not root.is_dir():
         parser.error("payload must be a directory")
     output = scan_payload(root, args.series)
+    if args.commit:
+        try:
+            output["cleaning"] = extract_selected(root, args.clean_dir, output, args.series)
+        except (OSError, ValueError) as exc:
+            output["cleaning_error"] = str(exc)
+            print(json.dumps(output, ensure_ascii=False, indent=2))
+            return 5
     print(json.dumps(output, ensure_ascii=False, indent=2))
+    if args.commit and output.get("cleaning", {}).get("verification", {}).get("safe_to_extract_selected"):
+        return 0
     return 0 if output["safe_to_continue"] else 4
 
 

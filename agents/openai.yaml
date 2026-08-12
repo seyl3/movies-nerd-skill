@@ -1,4 +1,4 @@
 interface:
   display_name: "Movies Nerd"
-  short_description: "Find, rank, download, and organize media safely"
-  default_prompt: "Use $movies-nerd to find, safely download, and organize a movie for my library."
+  short_description: "Download and organize films with one confirmation"
+  default_prompt: "Use $movies-nerd to find and safely download a movie, stay with it until organized, then give me film links and recommendations."
