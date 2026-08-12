@@ -15,8 +15,8 @@ from qbittorrent_api import QbtError, connected_client, normalize_hash
 
 CONTINUE_MONITORING = 8
 DEFAULT_NO_PROGRESS_SECONDS = 60
-DEFAULT_LOW_SPEED_SECONDS = 90
-DEFAULT_LOW_SPEED_BPS = 200 * 1024
+DEFAULT_LOW_SPEED_SECONDS = 60
+DEFAULT_LOW_SPEED_BPS = 256 * 1024
 DEFAULT_METADATA_SECONDS = 30
 
 
@@ -163,9 +163,8 @@ def assess_samples(
         "failover": {
             "required": stalled,
             "standby_ready": standby_ready,
-            "next": "activate the validated standby without asking again" if stalled and standby_ready else (
-                "probe the next confirmed wave without asking again" if stalled else None
-            ),
+            "replacement_available": standby_ready,
+            "next": "probe the next confirmed candidate without asking again" if stalled else None,
         },
     }
 

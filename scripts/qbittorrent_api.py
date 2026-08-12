@@ -23,7 +23,7 @@ from urllib.parse import parse_qs, quote, urlencode, urlparse
 from urllib.request import HTTPCookieProcessor, Request, build_opener
 import uuid
 
-from _common import GIB, format_gib, staging_roots
+from _common import GIB, format_gib, remove_appledouble_sibling, staging_roots
 from payload_safety import BIDI_RE, MAX_PAYLOAD_FILES, VIDEO_EXTENSIONS, filename_reasons
 
 MAX_BYTES = 15 * GIB
@@ -301,6 +301,7 @@ def _transfer_directory(kind: str, torrent_hash: str) -> Path:
     if stage.is_symlink():
         raise QbtError("staging root must not be a symlink")
     stage.mkdir(mode=0o700, parents=True, exist_ok=True)
+    remove_appledouble_sibling(stage)
     try:
         stage.chmod(0o700)
     except OSError as exc:
@@ -310,6 +311,8 @@ def _transfer_directory(kind: str, torrent_hash: str) -> Path:
         raise QbtError("transfer staging must not be a symlink")
     transfer.mkdir(mode=0o700, parents=True, exist_ok=True)
     transfer.chmod(0o700)
+    remove_appledouble_sibling(transfer)
+    remove_appledouble_sibling(transfer.parent)
     return transfer
 
 

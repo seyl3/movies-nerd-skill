@@ -5,13 +5,17 @@ from __future__ import annotations
 
 import argparse
 from contextlib import AbstractContextManager
+from contextlib import nullcontext
 import json
 import os
 from pathlib import Path
 import sys
 import time
 
-from _common import GIB
+from _common import (
+    GIB, clean_appledouble_tree, remove_appledouble_sibling, stage_for_kind,
+)
+from finalization_queue import start_all as request_finalization
 from job_manifest import (
     ManifestError, load_job, remove_failed_job, transition_job, update_job,
 )
@@ -38,6 +42,20 @@ class TerminalAcquisitionError(ControllerError):
     pass
 
 
+def bounded_integer(minimum: int, maximum: int, label: str):
+    def parse(value: str) -> int:
+        try:
+            parsed = int(value)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(f"{label} must be an integer") from exc
+        if not minimum <= parsed <= maximum:
+            raise argparse.ArgumentTypeError(
+                f"{label} must be between {minimum} and {maximum}"
+            )
+        return parsed
+    return parse
+
+
 class JobLock(AbstractContextManager):
     def __init__(self, job_path: Path, job_id: str):
         self.root = job_path.parent.parent
@@ -47,6 +65,7 @@ class JobLock(AbstractContextManager):
         if self.root.name != ".movies-nerd":
             raise ControllerError("job state is outside .movies-nerd")
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        remove_appledouble_sibling(self.path.parent)
         if self.path.exists():
             if self.path.is_symlink() or not self.path.is_file():
                 raise ControllerError("job lock is unsafe")
@@ -58,6 +77,7 @@ class JobLock(AbstractContextManager):
                     raise ControllerError("this Movies Nerd job is already running")
             except ProcessLookupError:
                 self.path.unlink(missing_ok=True)
+                remove_appledouble_sibling(self.path)
             except (json.JSONDecodeError, OSError, TypeError, ValueError):
                 self.path.unlink(missing_ok=True)
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
@@ -67,15 +87,19 @@ class JobLock(AbstractContextManager):
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
+        remove_appledouble_sibling(self.path)
         return self
 
     def __exit__(self, exc_type, exc, traceback):
         if self.path.is_file() and not self.path.is_symlink():
             self.path.unlink(missing_ok=True)
+        remove_appledouble_sibling(self.path)
         try:
             self.path.parent.rmdir()
         except OSError:
             pass
+        else:
+            remove_appledouble_sibling(self.path.parent)
         return False
 
 
@@ -232,7 +256,7 @@ def activate_standby(job_path: Path, job: dict, client, old_hash: str) -> tuple[
         torrent_info(client, standby_hash)
     except QbtError:
         return None
-    remove_quietly(client, old_hash)
+    remove_and_verify(client, old_hash)
     transition_job(job_path, "replacement-started")
     command_start(client, argparse.Namespace(
         hash=standby_hash, commit=True, include_extras=False,
@@ -259,7 +283,7 @@ def replace_active(job_path: Path, job: dict, client, old_hash: str) -> tuple[st
     activated = activate_standby(job_path, job, client, old_hash)
     if activated:
         return activated
-    remove_quietly(client, old_hash)
+    remove_and_verify(client, old_hash)
     transition_job(job_path, "replacement-started")
     _, current = load_job(job_path)
     excluded = set((current.get("controller") or {}).get("tried_hashes") or [])
@@ -326,9 +350,13 @@ def ensure_active(job_path: Path, job: dict, client) -> tuple[str, dict]:
     raise ControllerError(f"job cannot be acquired while state is {state}")
 
 
-def run(job_path: Path, *, poll_seconds: int, max_seconds: int = 0) -> dict:
+def run(
+    job_path: Path, *, poll_seconds: int, max_seconds: int = 0,
+    acquire_lock: bool = True,
+) -> dict:
     checked, job = load_job(job_path)
-    with JobLock(checked, str(job["job_id"])):
+    lock = JobLock(checked, str(job["job_id"])) if acquire_lock else nullcontext()
+    with lock:
         client = connected_client(wait_seconds=20)
         readiness = preflight(client)
         try:
@@ -346,6 +374,7 @@ def run(job_path: Path, *, poll_seconds: int, max_seconds: int = 0) -> dict:
         job = enforce_single_transfer(checked, job, client, active_hash)
         if job.get("state") == "downloaded":
             return {"downloaded": True, "job": str(checked), "preflight": readiness}
+        request_finalization(checked)
         print(json.dumps({
             "event": "downloading",
             "job": str(checked),
@@ -355,11 +384,30 @@ def run(job_path: Path, *, poll_seconds: int, max_seconds: int = 0) -> dict:
         rid = 0
         current = None
         samples = []
+        heartbeat_epoch = 0.0
+        prior_downloaded = -1
         while True:
             rid, current = sync_torrent(client, active_hash, rid, current)
             samples.append(to_sample(current))
             samples = trim(samples, max(DEFAULT_LOW_SPEED_SECONDS, DEFAULT_NO_PROGRESS_SECONDS, 120) + 10)
             _, job = load_job(checked)
+            now = time.time()
+            if samples[-1].downloaded > prior_downloaded:
+                prior_downloaded = samples[-1].downloaded
+                update_job(checked, {
+                    "controller": {"last_progress_epoch": now},
+                })
+            if now - heartbeat_epoch >= 30:
+                heartbeat_epoch = now
+                print(json.dumps({
+                    "event": "progress",
+                    "job": str(checked),
+                    "progress": round(samples[-1].progress, 4),
+                    "downloaded": samples[-1].downloaded,
+                    "speed": samples[-1].speed,
+                }), flush=True)
+                clean_appledouble_tree(checked.parent.parent)
+                clean_appledouble_tree(stage_for_kind(str(job["kind"])))
             report = assess_samples(
                 samples, str((job.get("release") or {}).get("source") or "selected source"),
                 standby_ready=replacement_available(job),
@@ -416,8 +464,14 @@ def run(job_path: Path, *, poll_seconds: int, max_seconds: int = 0) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--job", type=Path, required=True)
-    parser.add_argument("--poll-seconds", type=int, choices=range(2, 31), default=5)
-    parser.add_argument("--max-seconds", type=int, choices=range(0, 86401), default=0)
+    parser.add_argument(
+        "--poll-seconds", type=bounded_integer(2, 30, "poll seconds"), default=5,
+        metavar="2..30",
+    )
+    parser.add_argument(
+        "--max-seconds", type=bounded_integer(0, 86400, "maximum seconds"), default=0,
+        metavar="0..86400", help="0 waits through completion",
+    )
     parser.add_argument("--commit", action="store_true")
     args = parser.parse_args()
     if not args.commit:
