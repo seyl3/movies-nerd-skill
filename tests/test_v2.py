@@ -339,11 +339,11 @@ class RaceAndMonitorV2Tests(unittest.TestCase):
 
 
 class ControllerAndCleanupTests(unittest.TestCase):
-    def test_batch_runner_limits_concurrency_and_preserves_order(self):
+    def test_batch_runner_starts_all_requested_jobs_and_preserves_order(self):
         with tempfile.TemporaryDirectory() as raw:
             env = roots(Path(raw))
             with patch.dict(os.environ, env, clear=False):
-                paths = [job_manifest.create_job("movie", f"Example {index}", 2024) for index in range(4)]
+                paths = [job_manifest.create_job("movie", f"Example {index}", 2024) for index in range(6)]
                 active = 0
                 maximum = 0
 
@@ -355,10 +355,18 @@ class ControllerAndCleanupTests(unittest.TestCase):
                     active -= 1
                     return {"ready": True, "title": path.stem}
 
-                result = batch_jobs.run_many(paths, concurrency=2, runner=runner)
-            self.assertEqual(maximum, 2)
-            self.assertEqual(result["ready"], 4)
+                result = batch_jobs.run_many(paths, runner=runner)
+            self.assertEqual(maximum, 6)
+            self.assertEqual(result["concurrency"], 6)
+            self.assertEqual(result["ready"], 6)
             self.assertEqual([item["job"] for item in result["jobs"]], [str(path) for path in paths])
+
+    def test_batch_input_is_not_capped_at_twenty_titles(self):
+        items = [
+            {"title": f"Example {index}", "year": 2024, "kind": "movie"}
+            for index in range(25)
+        ]
+        self.assertEqual(len(batch_jobs.checked_items({"items": items})), 25)
 
     def test_foreground_runner_dispatches_series_finalizer(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -372,9 +380,11 @@ class ControllerAndCleanupTests(unittest.TestCase):
                         for name in finalization_queue.SERIES_TASKS
                     },
                 })
+                output = io.StringIO()
                 with (
                     patch.object(acquire, "run", return_value={"downloaded": True}),
                     patch.object(run_job, "finalize_series", return_value={"ready": True}) as finish,
+                    redirect_stdout(output),
                 ):
                     result = run_job.run(path, artifact_wait_seconds=0)
             self.assertTrue(result["ready"])
@@ -452,6 +462,7 @@ class ControllerAndCleanupTests(unittest.TestCase):
                     })
                     return "b" * 40, updated
 
+                output = io.StringIO()
                 with (
                     patch.object(acquire, "connected_client", return_value=Client()),
                     patch.object(acquire, "preflight", return_value={"ready": True}),
@@ -464,11 +475,17 @@ class ControllerAndCleanupTests(unittest.TestCase):
                     patch.object(acquire, "DEFAULT_LOW_SPEED_SECONDS", 1),
                     patch.object(acquire, "DEFAULT_LOW_SPEED_BPS", 256 * 1024),
                     patch.object(acquire.time, "sleep"),
-                    redirect_stdout(io.StringIO()),
+                    redirect_stdout(output),
                 ):
                     result = acquire.run(path, poll_seconds=2)
             self.assertTrue(result["downloaded"])
             failover.assert_called_once()
+            events = [json.loads(line)["event"] for line in output.getvalue().splitlines()]
+            self.assertEqual(events, [
+                "download-started", "download-stalled",
+                "source-replaced", "download-completed",
+            ])
+            self.assertNotIn("progress", events)
 
     def test_finalization_requests_real_work_instead_of_claiming_it_started(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -492,9 +509,11 @@ class ControllerAndCleanupTests(unittest.TestCase):
                         for name in finalization_queue.MOVIE_TASKS
                     },
                 })
+                output = io.StringIO()
                 with (
                     patch.object(acquire, "run", return_value={"downloaded": True}),
                     patch.object(run_job, "finalize", return_value={"ready": True}) as finish,
+                    redirect_stdout(output),
                 ):
                     result = run_job.run(path, artifact_wait_seconds=0)
                 _, job = job_manifest.load_job(path)
@@ -502,6 +521,8 @@ class ControllerAndCleanupTests(unittest.TestCase):
             self.assertTrue(result["ready"])
             self.assertFalse(lock.exists())
             finish.assert_called_once()
+            events = [json.loads(line)["event"] for line in output.getvalue().splitlines()]
+            self.assertEqual(events, ["finalization-started", "ready"])
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg required")
     def test_downloaded_movie_finalizes_and_cleans_end_to_end(self):

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare or run several requested titles with bounded concurrency."""
+"""Prepare and run every requested title concurrently by default."""
 
 from __future__ import annotations
 
@@ -15,8 +15,7 @@ from job_manifest import ManifestError, load_job, read_json
 import prepare_job
 import run_job
 
-MAX_BATCH_ITEMS = 20
-DEFAULT_DOWNLOAD_CONCURRENCY = 2
+ALL_JOBS = 0
 
 
 class BatchError(ValueError):
@@ -25,8 +24,8 @@ class BatchError(ValueError):
 
 def checked_items(value: dict) -> list[dict]:
     items = value.get("items")
-    if not isinstance(items, list) or not 1 <= len(items) <= MAX_BATCH_ITEMS:
-        raise BatchError(f"items must contain 1 to {MAX_BATCH_ITEMS} requested titles")
+    if not isinstance(items, list) or not items:
+        raise BatchError("items must contain at least one requested title")
     output = []
     for index, raw in enumerate(items, 1):
         if not isinstance(raw, dict):
@@ -55,7 +54,15 @@ def checked_items(value: dict) -> list[dict]:
     return output
 
 
-def prepare_many(value: dict, *, concurrency: int = 4, timeout: float = 5.0) -> dict:
+def worker_count(requested: int, concurrency: int) -> int:
+    if requested < 1:
+        raise BatchError("at least one job is required")
+    if concurrency < 0:
+        raise BatchError("concurrency cannot be negative")
+    return requested if concurrency == ALL_JOBS else min(concurrency, requested)
+
+
+def prepare_many(value: dict, *, concurrency: int = ALL_JOBS, timeout: float = 5.0) -> dict:
     items = checked_items(value)
     results: list[dict | None] = [None] * len(items)
 
@@ -70,7 +77,8 @@ def prepare_many(value: dict, *, concurrency: int = 4, timeout: float = 5.0) -> 
                 "error": str(exc),
             }
 
-    with ThreadPoolExecutor(max_workers=min(concurrency, len(items))) as pool:
+    workers = worker_count(len(items), concurrency)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [pool.submit(worker, index, item) for index, item in enumerate(items)]
         for future in as_completed(futures):
             index, result = future.result()
@@ -79,18 +87,19 @@ def prepare_many(value: dict, *, concurrency: int = 4, timeout: float = 5.0) -> 
     return {
         "prepared": sum(bool(item.get("prepared")) for item in completed),
         "requested": len(items),
+        "concurrency": workers,
         "authorized": True,
         "jobs": completed,
     }
 
 
 def run_many(
-    job_paths: list[Path], *, concurrency: int = DEFAULT_DOWNLOAD_CONCURRENCY,
+    job_paths: list[Path], *, concurrency: int = ALL_JOBS,
     poll_seconds: int = 5, artifact_wait_seconds: int = 600,
     runner: Callable[..., dict] = run_job.run,
 ) -> dict:
-    if not 1 <= len(job_paths) <= MAX_BATCH_ITEMS:
-        raise BatchError(f"provide 1 to {MAX_BATCH_ITEMS} jobs")
+    if not job_paths:
+        raise BatchError("provide at least one job")
     checked: list[Path] = []
     seen = set()
     for raw in job_paths:
@@ -111,7 +120,8 @@ def run_many(
         except Exception as exc:  # One stalled title must not strand the batch.
             return index, {"job": str(path), "ready": False, "resumable": True, "error": str(exc)}
 
-    with ThreadPoolExecutor(max_workers=min(concurrency, len(checked))) as pool:
+    workers = worker_count(len(checked), concurrency)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [pool.submit(worker, index, path) for index, path in enumerate(checked)]
         for future in as_completed(futures):
             index, result = future.result()
@@ -120,7 +130,7 @@ def run_many(
     return {
         "requested": len(checked),
         "ready": sum(bool(item.get("ready")) for item in completed),
-        "concurrency": min(concurrency, len(checked)),
+        "concurrency": workers,
         "jobs": completed,
     }
 
@@ -130,18 +140,24 @@ def main() -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     prepare = sub.add_parser("prepare")
     prepare.add_argument("--input", required=True, help="JSON object with an items list")
-    prepare.add_argument("--concurrency", type=int, default=4)
+    prepare.add_argument(
+        "--concurrency", type=int, default=ALL_JOBS,
+        help="0 starts every requested search together (default)",
+    )
     prepare.add_argument("--timeout", type=float, default=5.0)
     run = sub.add_parser("run")
     run.add_argument("--job", type=Path, action="append", required=True)
-    run.add_argument("--concurrency", type=int, default=DEFAULT_DOWNLOAD_CONCURRENCY)
+    run.add_argument(
+        "--concurrency", type=int, default=ALL_JOBS,
+        help="0 starts every requested download together (default)",
+    )
     run.add_argument("--poll-seconds", type=int, default=5)
     run.add_argument("--artifact-wait-seconds", type=int, default=600)
     run.add_argument("--commit", action="store_true")
     args = parser.parse_args()
     try:
         if args.command == "prepare":
-            if not 1 <= args.concurrency <= 8 or not 1 <= args.timeout <= 15:
+            if args.concurrency < 0 or not 1 <= args.timeout <= 15:
                 raise BatchError("preparation concurrency or timeout is outside its safe range")
             result = prepare_many(
                 read_json(args.input, 1024 * 1024),
@@ -151,8 +167,8 @@ def main() -> int:
         else:
             if not args.commit:
                 parser.error("batch execution requires --commit for the requested downloads")
-            if not 1 <= args.concurrency <= 3:
-                raise BatchError("download concurrency must be between 1 and 3")
+            if args.concurrency < 0:
+                raise BatchError("download concurrency cannot be negative")
             result = run_many(
                 args.job, concurrency=args.concurrency,
                 poll_seconds=args.poll_seconds,
