@@ -13,7 +13,7 @@ Use this four-message pattern whenever possible:
 
 Searching, opening qBittorrent, checking the files, downloading, adding subtitles and artwork, writing metadata, naming, and organizing happen without extra questions or technical narration. A short progress update is acceptable for a long transfer, but it must not demand action.
 
-The user never sees the hidden candidate probes, warm standby, provider refresh, liveness cache, or cleanup checks. Those exist solely to make this four-message flow fast and reliable.
+The user never sees the hidden candidate comparison, duplicate pruning, provider refresh, liveness cache, or cleanup checks. Those exist solely to make this four-message flow fast and reliable.
 
 ## Stay until it is ready
 
@@ -31,7 +31,7 @@ The user never sees the hidden candidate probes, warm standby, provider refresh,
 - Accept any safe dedicated absolute folder, regardless of its name. `/Volumes/ssd/Films` means exactly that folder; do not require or append `Movies`.
 - Ask only for the current media type. A movie request does not require the Series path.
 - A reply such as `Yes, save it in /Volumes/ssd/Films` answers both confirmation and destination. Continue immediately.
-- The one confirmation covers two invisible waves of up to three candidates at the same quality and within the displayed maximum size. Do not ask when probing, activating a standby, replacing a stalled candidate, or refreshing APIs inside that envelope.
+- The one confirmation covers two invisible waves of up to three candidates at the same quality and within the displayed maximum size. Do not ask when comparing candidates, pruning duplicates, replacing a stalled candidate, or refreshing APIs inside that envelope.
 - Ask again only for different quality, a larger size, an explicitly disclosed size exception, or an unavoidable safety decision.
 
 ## Keep implementation invisible

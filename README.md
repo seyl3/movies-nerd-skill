@@ -2,12 +2,12 @@
 
 Movies Nerd is an opinionated all-in-one Codex skill for nontechnical film fans. Ask for a movie or series, approve one compact quality/size choice, and it stays with the job until the library entry is ready.
 
-Version: **2.0.0**
+Version: **2.0.1**
 
 ## What it does
 
 - Searches YTS, Knaben, APIBay, Magnetz, configured Torznab providers, then EXT only as a last resort.
-- Opens qBittorrent, measures several candidates privately, keeps a warm backup, and replaces dead or slow transfers automatically.
+- Opens qBittorrent, compares several candidates briefly, keeps only the best one, deletes duplicate partial downloads, and replaces a later dead or slow transfer automatically.
 - Prefers efficient 4K up to 15 GiB or space-efficient 1080p, MKV, original audio, and no extras.
 - Adds clean names, NFO metadata, posters, fanart, track labels, and English/French subtitles.
 - Salvages verified video when separate release junk appears.

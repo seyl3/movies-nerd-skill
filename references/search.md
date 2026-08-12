@@ -17,7 +17,8 @@ Run `scripts/acquire.py --job <manifest> --commit`. It performs the qBittorrent 
 
 - Probe at most three candidates together, capped at 2 MiB/s each and roughly 16 MiB of downloaded probe data.
 - Score actual downloaded-byte growth, median speed, availability, connected peers, metadata latency, then discovery score.
-- Continue the fastest live candidate. Keep the second-best validated candidate stopped as a warm standby. Remove other candidates immediately.
+- Continue only the best live candidate. Permanently remove the second-best and every other candidate, including their partial data, as soon as the bounded comparison has enough evidence and never later than one minute. Multiple candidates may transfer only during this short comparison; never keep a stopped or downloading duplicate afterward.
+- On resume, inspect the exact hashes recorded for the job and remove any non-winner left by an older run before monitoring continues.
 - If the first wave is dead, probe the second wave. If the confirmed pool is exhausted, perform one fresh API search inside the same quality and size envelope without asking again.
 - Never reveal candidate churn, provider failures, hashes, or probe details to the user.
 

@@ -18,7 +18,7 @@
 1. Add no more than three confirmed candidates at once into exact hash-named paths under `.incoming/Movies Nerd/transfers` with `movies-nerd` and media-kind tags.
 2. Prefer a YTS direct `.torrent` only after `torrent_metadata.py` validates its size, canonical bencoding, info hash, file counts, lengths, and non-traversing paths. Otherwise use a fixed-tracker magnet.
 3. Obtain metadata under a 25-second deadline. Select only the main feature or episodes and set every companion and extra to priority zero before the live probe.
-4. Bound each live probe to 2 MiB/s and approximately 16 MiB. Choose using real byte growth, median speed, availability, peers, and metadata latency. Keep one stopped validated standby; remove every other candidate immediately.
+4. Bound each live probe to 2 MiB/s and approximately 16 MiB. Choose using real byte growth, median speed, availability, peers, and metadata latency. Keep only the best candidate, then remove and verify absence of every other qBittorrent entry and exact partial-data directory. Never retain a stopped or downloading duplicate after the comparison window.
 
 Gate 1 rejects absolute/traversing/deceptive paths, control or bidi characters, collisions, invalid sizes or counts, unsafe selected extensions, spoofing, a wrong staging path, a missing main feature, or material mismatch from the confirmed size.
 
@@ -35,6 +35,6 @@ Keep MKV header changes and stream-copy remuxes inside staging with rollback and
 
 ## Cleanup invariant
 
-Every job must clean itself. Success is forbidden while any exact job artifact remains in qBittorrent, `.incoming`, `.movies-nerd/jobs`, `.movies-nerd/locks`, `.movies-nerd/torrents`, `.movies-nerd/trash`, or AppleDouble sidecars. `finish_staging.py` verifies the final library entry and qBittorrent absence before deleting resumable job state. If any cleanup step cannot be verified, retain the manifest and report the job as resumable—not ready.
+Every job must clean itself. After each candidate comparison, the winner must be the only remaining qBittorrent transfer for that job. Success is forbidden while any exact job artifact remains in qBittorrent, `.incoming`, `.movies-nerd/jobs`, `.movies-nerd/locks`, `.movies-nerd/torrents`, `.movies-nerd/trash`, or AppleDouble sidecars. `finish_staging.py` verifies the final library entry and qBittorrent absence before deleting resumable job state. If any cleanup step cannot be verified, retain the manifest and report the job as resumable—not ready.
 
 Failed candidate cleanup uses only `remove_movies_nerd_torrent`, which verifies the `movies-nerd` tag and exact hash-named staging directory. Never remove an untagged torrent or any file outside that exact path. The provider-health cache may persist because it contains only bounded provider timing and info-hash liveness, never credentials or private paths.
