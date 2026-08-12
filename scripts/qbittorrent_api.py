@@ -19,7 +19,7 @@ import sys
 import time
 import unicodedata
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import parse_qs, quote, urlencode, urlparse
 from urllib.request import HTTPCookieProcessor, Request, build_opener
 import uuid
 
@@ -35,6 +35,12 @@ SKIP_ONLY_REASONS = {
     "dangerous or archive extension, including inner extension",
     "unexpected extension",
 }
+SAFE_PUBLIC_TRACKERS = (
+    "udp://tracker.opentrackr.org:1337/announce",
+    "udp://tracker.torrent.eu.org:451/announce",
+    "udp://tracker.dler.org:6969/announce",
+    "udp://open.stealth.si:80/announce",
+)
 
 
 class QbtError(RuntimeError):
@@ -50,7 +56,7 @@ class QbtAccessDenied(QbtError):
 
 
 def access_denied(exc: BaseException) -> bool:
-    """Recognize host sandbox denials without misreporting qBittorrent as closed."""
+    """Recognize host permission denials without misreporting qBittorrent as closed."""
     current: object = exc
     for _ in range(5):
         if isinstance(current, PermissionError) or getattr(current, "errno", None) in {
@@ -103,18 +109,37 @@ def magnet_hash(magnet: str) -> str:
     raise QbtError("magnet lacks a supported v1 btih info hash")
 
 
-def multipart(fields: dict[str, str]) -> tuple[bytes, str]:
+def safe_magnet(info_hash: str, title: str, *, trackers: bool = True) -> str:
+    normalized = normalize_hash(info_hash)
+    clean_title = " ".join(str(title or "torrent").strip().split())[:300] or "torrent"
+    if CONTROL_RE.search(clean_title):
+        raise QbtError("magnet title contains control characters")
+    result = f"magnet:?xt=urn:btih:{normalized}&dn={quote(clean_title, safe='')}"
+    if trackers:
+        result += "".join(f"&tr={quote(tracker, safe='')}" for tracker in SAFE_PUBLIC_TRACKERS)
+    return result
+
+
+def multipart(fields: dict[str, str | bytes]) -> tuple[bytes, str]:
     boundary = "----MoviesNerd" + uuid.uuid4().hex
     chunks: list[bytes] = []
     for name, value in fields.items():
         if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", name):
             raise QbtError("invalid multipart field name")
-        chunks.extend([
-            f"--{boundary}\r\n".encode(),
-            f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode(),
-            value.encode("utf-8"),
-            b"\r\n",
-        ])
+        chunks.append(f"--{boundary}\r\n".encode())
+        if isinstance(value, bytes):
+            chunks.extend([
+                f'Content-Disposition: form-data; name="{name}"; filename="candidate.torrent"\r\n'.encode(),
+                b"Content-Type: application/x-bittorrent\r\n\r\n",
+                value,
+                b"\r\n",
+            ])
+        else:
+            chunks.extend([
+                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode(),
+                value.encode("utf-8"),
+                b"\r\n",
+            ])
     chunks.append(f"--{boundary}--\r\n".encode())
     return b"".join(chunks), f"multipart/form-data; boundary={boundary}"
 
@@ -130,15 +155,17 @@ class QbtClient:
             if response.strip() != b"Ok.":
                 raise QbtError("qBittorrent needs its one-time Movies Nerd setup")
 
-    def request(self, endpoint: str, fields: dict[str, str] | None = None, multipart_body: bool = False) -> bytes:
+    def request(self, endpoint: str, fields: dict[str, str | bytes] | None = None, multipart_body: bool = False) -> bytes:
         url = f"{self.base_url}/api/v2/{endpoint}"
-        headers = {"Referer": self.base_url, "Origin": self.base_url, "User-Agent": "Movies-Nerd/1"}
+        headers = {"Referer": self.base_url, "Origin": self.base_url, "User-Agent": "Movies-Nerd/2"}
         data = None
         if fields is not None:
             if multipart_body:
                 data, content_type = multipart(fields)
                 headers["Content-Type"] = content_type
             else:
+                if any(not isinstance(value, str) for value in fields.values()):
+                    raise QbtError("binary qBittorrent fields require multipart encoding")
                 data = urlencode(fields).encode("utf-8")
                 headers["Content-Type"] = "application/x-www-form-urlencoded"
         request = Request(url, data=data, headers=headers, method="POST" if fields is not None else "GET")
@@ -238,6 +265,95 @@ def connected_client(wait_seconds: float = 12.0, retry_interval: float = 0.5) ->
 def safe_stage(kind: str) -> Path:
     movie_stage, series_stage = staging_roots()
     return movie_stage if kind == "movie" else series_stage
+
+
+def preflight(client: QbtClient) -> dict:
+    """Read the transfer state once so acquisition failures are not blamed on a torrent."""
+    version = client.request("app/version").decode("utf-8", "replace").strip()
+    transfer = client.json("transfer/info")
+    sync = client.json("sync/maindata?rid=0")
+    if not isinstance(transfer, dict) or not isinstance(sync, dict):
+        raise QbtError("qBittorrent readiness data is unavailable")
+    server = sync.get("server_state") or {}
+    if not isinstance(server, dict):
+        server = {}
+    connection = str(transfer.get("connection_status") or server.get("connection_status") or "unknown")
+    try:
+        dht_nodes = max(0, int(server.get("dht_nodes", 0) or 0))
+    except (TypeError, ValueError):
+        dht_nodes = 0
+    try:
+        global_limit = max(0, int(server.get("dl_rate_limit", 0) or 0))
+    except (TypeError, ValueError):
+        global_limit = 0
+    return {
+        "ready": True,
+        "version": version,
+        "connection": connection,
+        "dht_nodes": dht_nodes,
+        "alternative_speed_limits": bool(server.get("use_alt_speed_limits")),
+        "global_download_limit": global_limit,
+    }
+
+
+def _transfer_directory(kind: str, torrent_hash: str) -> Path:
+    stage = safe_stage(kind)
+    if stage.is_symlink():
+        raise QbtError("staging root must not be a symlink")
+    stage.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        stage.chmod(0o700)
+    except OSError as exc:
+        raise QbtError(f"cannot restrict staging permissions: {exc}") from exc
+    transfer = stage / "transfers" / torrent_hash
+    if transfer.is_symlink():
+        raise QbtError("transfer staging must not be a symlink")
+    transfer.mkdir(mode=0o700, parents=True, exist_ok=True)
+    transfer.chmod(0o700)
+    return transfer
+
+
+def add_candidate(
+    client: QbtClient, *, info_hash: str, kind: str, rename: str | None,
+    magnet: str | None = None, torrent_data: bytes | None = None,
+) -> dict:
+    """Add one already-confirmed magnet or validated .torrent file stopped."""
+    normalized = normalize_hash(info_hash)
+    if bool(magnet) == bool(torrent_data):
+        raise QbtError("candidate must provide exactly one torrent source")
+    if magnet and magnet_hash(magnet) != normalized:
+        raise QbtError("candidate magnet does not match its expected hash")
+    if torrent_data is not None:
+        from torrent_metadata import TorrentMetadataError, inspect_torrent
+        try:
+            inspect_torrent(torrent_data, normalized)
+        except TorrentMetadataError as exc:
+            raise QbtError(str(exc)) from exc
+    transfer = _transfer_directory(kind, normalized)
+    fields: dict[str, str | bytes] = {
+        "savepath": str(transfer),
+        "tags": f"movies-nerd,{kind}",
+        "paused": "true",
+        "root_folder": "true",
+        "autoTMM": "false",
+    }
+    if magnet:
+        fields["urls"] = magnet
+    else:
+        fields["torrents"] = torrent_data or b""
+    if rename:
+        if CONTROL_RE.search(rename) or BIDI_RE.search(rename) or "/" in rename or "\\" in rename or rename in {".", ".."}:
+            raise QbtError("rename must be a single safe path component")
+        fields["rename"] = rename
+    response = client.request("torrents/add", fields, multipart_body=True).decode("utf-8", "replace").strip()
+    if response not in ("", "Ok."):
+        raise QbtError(f"qBittorrent rejected the torrent: {response}")
+    return {
+        "added_stopped": True,
+        "hash": normalized,
+        "staging": str(transfer),
+        "source_type": "torrent" if torrent_data is not None else "magnet",
+    }
 
 
 def classify_files(files: list[dict], series: bool = False) -> dict:
@@ -371,43 +487,40 @@ def validate_torrent(client: QbtClient, torrent_hash: str, allow_oversize: bool 
 
 
 def command_status(client: QbtClient, _args: argparse.Namespace) -> dict:
-    version = client.request("app/version").decode("utf-8", "replace").strip()
-    return {"ready": True, "app": "qBittorrent", "version": version}
+    return {"app": "qBittorrent", **preflight(client)}
 
 
 def command_add(client: QbtClient, args: argparse.Namespace) -> dict:
     torrent_hash = magnet_hash(args.magnet)
     if not args.commit:
         raise QbtError("refusing to add torrent without --commit")
-    stage = safe_stage(args.kind)
-    if stage.is_symlink():
-        raise QbtError("staging root must not be a symlink")
-    stage.mkdir(mode=0o700, parents=True, exist_ok=True)
-    try:
-        stage.chmod(0o700)
-    except OSError as exc:
-        raise QbtError(f"cannot restrict staging permissions: {exc}") from exc
-    transfer = stage / "transfers" / torrent_hash
-    if transfer.is_symlink():
-        raise QbtError("transfer staging must not be a symlink")
-    transfer.mkdir(mode=0o700, parents=True, exist_ok=True)
-    transfer.chmod(0o700)
-    fields = {
-        "urls": args.magnet,
-        "savepath": str(transfer),
-        "tags": f"movies-nerd,{args.kind}",
-        "paused": "true",
-        "root_folder": "true",
-        "autoTMM": "false",
-    }
-    if args.rename:
-        if CONTROL_RE.search(args.rename) or BIDI_RE.search(args.rename) or "/" in args.rename or "\\" in args.rename or args.rename in {".", ".."}:
-            raise QbtError("rename must be a single safe path component")
-        fields["rename"] = args.rename
-    response = client.request("torrents/add", fields, multipart_body=True).decode("utf-8", "replace").strip()
-    if response not in ("", "Ok."):
-        raise QbtError(f"qBittorrent rejected the torrent: {response}")
-    return {"added_stopped": True, "hash": torrent_hash, "staging": str(transfer), "next": "inspect metadata before start"}
+    result = add_candidate(
+        client, info_hash=torrent_hash, kind=args.kind, rename=args.rename,
+        magnet=args.magnet,
+    )
+    result["next"] = "inspect metadata before start"
+    return result
+
+
+def configure_selection(
+    client: QbtClient, torrent_hash: str, *, include_extras: bool = False,
+    allow_oversize: bool = False, series: bool = False,
+) -> tuple[dict, dict, int]:
+    info, files = validate_torrent(client, torrent_hash, allow_oversize, series=series)
+    if include_extras:
+        keep_indices = files["all_safe_video_indices"]
+        skip_indices = [item["index"] for item in files["files"] if item["index"] not in keep_indices]
+    else:
+        keep_indices = files["keep_indices"]
+        skip_indices = files["skip_indices"]
+    transfer_size = sum(item["size"] for item in files["files"] if item["index"] in keep_indices)
+    if transfer_size > MAX_BYTES and not allow_oversize:
+        raise QbtError(f"actual selected transfer is {format_gib(transfer_size)}, above the 15 GiB limit")
+    if keep_indices:
+        client.request("torrents/filePrio", {"hash": torrent_hash, "id": "|".join(map(str, keep_indices)), "priority": "1"})
+    if skip_indices:
+        client.request("torrents/filePrio", {"hash": torrent_hash, "id": "|".join(map(str, skip_indices)), "priority": "0"})
+    return info, files, transfer_size
 
 
 def command_inspect(client: QbtClient, args: argparse.Namespace) -> dict:
@@ -451,7 +564,7 @@ def command_fetch_metadata(client: QbtClient, args: argparse.Namespace) -> dict:
     old_limit = int(info.get("dl_limit", 0) or 0)
     if old_limit < 0:
         old_limit = 0
-    client.request("torrents/setDownloadLimit", {"hashes": torrent_hash, "limit": "1024"})
+    client.request("torrents/setDownloadLimit", {"hashes": torrent_hash, "limit": str(2 * 1024 * 1024)})
     started = False
     files: list[dict] = []
     try:
@@ -476,7 +589,7 @@ def command_fetch_metadata(client: QbtClient, args: argparse.Namespace) -> dict:
         "hash": torrent_hash,
         "files": len(files),
         "torrent_stopped": True,
-        "temporary_content_limit_bytes_per_second": 1024,
+        "temporary_content_limit_bytes_per_second": 2 * 1024 * 1024,
         "next": "run inspect before starting content transfer",
     }
 
@@ -485,20 +598,11 @@ def command_start(client: QbtClient, args: argparse.Namespace) -> dict:
     torrent_hash = normalize_hash(args.hash)
     if not args.commit:
         raise QbtError("refusing to start content transfer without --commit")
-    info, files = validate_torrent(client, torrent_hash, args.allow_oversize, series=args.series)
-    if args.include_extras:
-        keep_indices = files["all_safe_video_indices"]
-        skip_indices = [item["index"] for item in files["files"] if item["index"] not in keep_indices]
-    else:
-        keep_indices = files["keep_indices"]
-        skip_indices = files["skip_indices"]
-    transfer_size = sum(item["size"] for item in files["files"] if item["index"] in keep_indices)
-    if transfer_size > MAX_BYTES and not args.allow_oversize:
-        raise QbtError(f"actual selected transfer is {format_gib(transfer_size)}, above the 15 GiB limit")
-    if keep_indices:
-        client.request("torrents/filePrio", {"hash": torrent_hash, "id": "|".join(map(str, keep_indices)), "priority": "1"})
-    if skip_indices:
-        client.request("torrents/filePrio", {"hash": torrent_hash, "id": "|".join(map(str, skip_indices)), "priority": "0"})
+    info, _files, transfer_size = configure_selection(
+        client, torrent_hash, include_extras=args.include_extras,
+        allow_oversize=args.allow_oversize, series=args.series,
+    )
+    client.request("torrents/setForceStart", {"hashes": torrent_hash, "value": "true"})
     client.request("torrents/start", {"hashes": torrent_hash})
     return {
         "started": True,
@@ -577,9 +681,9 @@ def parser() -> argparse.ArgumentParser:
     inspect.add_argument("--wait", type=int, choices=range(0, 121), default=0, metavar="SECONDS")
     inspect.add_argument("--allow-oversize", action="store_true")
     inspect.add_argument("--series", action="store_true", help="keep all non-extra episode videos")
-    metadata = sub.add_parser("fetch-metadata", help="briefly start at 1 KiB/s until magnet metadata arrives")
+    metadata = sub.add_parser("fetch-metadata", help="briefly fetch magnet metadata under a bounded 2 MiB/s limit")
     metadata.add_argument("--hash", required=True)
-    metadata.add_argument("--wait", type=int, choices=range(10, 121), default=60, metavar="SECONDS")
+    metadata.add_argument("--wait", type=int, choices=range(10, 61), default=25, metavar="SECONDS")
     metadata.add_argument("--commit", action="store_true")
     start = sub.add_parser("start", help="deselect extras and start a validated torrent")
     start.add_argument("--hash", required=True)

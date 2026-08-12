@@ -39,15 +39,45 @@ def staging_roots(environ: dict[str, str] | None = None) -> tuple[Path, Path]:
     return movies / ".incoming" / "Movies Nerd", series / ".incoming" / "Movies Nerd"
 
 
+def state_roots(environ: dict[str, str] | None = None) -> tuple[Path, Path]:
+    """Return the persistent, non-payload state roots for each library."""
+    movies, series = library_roots(environ)
+    return movies / ".movies-nerd", series / ".movies-nerd"
+
+
+def root_for_kind(kind: str, environ: dict[str, str] | None = None) -> Path:
+    if kind not in {"movie", "series"}:
+        raise ValueError("kind must be movie or series")
+    movies, series = library_roots(environ)
+    return movies if kind == "movie" else series
+
+
+def stage_for_kind(kind: str, environ: dict[str, str] | None = None) -> Path:
+    if kind not in {"movie", "series"}:
+        raise ValueError("kind must be movie or series")
+    movies, series = staging_roots(environ)
+    return movies if kind == "movie" else series
+
+
+def state_for_kind(kind: str, environ: dict[str, str] | None = None) -> Path:
+    if kind not in {"movie", "series"}:
+        raise ValueError("kind must be movie or series")
+    movies, series = state_roots(environ)
+    return movies if kind == "movie" else series
+
+
 def library_configuration(environ: dict[str, str] | None = None) -> dict:
     values = os.environ if environ is None else environ
     movies, series = library_roots(values)
     movie_stage, series_stage = staging_roots(values)
+    movie_state, series_state = state_roots(values)
     return {
         "movies_root": str(movies),
         "series_root": str(series),
         "movie_staging": str(movie_stage),
         "series_staging": str(series_stage),
+        "movie_state": str(movie_state),
+        "series_state": str(series_state),
         "movies_source": "environment" if values.get(MOVIES_ROOT_ENV) else "default",
         "series_source": "environment" if values.get(SERIES_ROOT_ENV) else "default",
     }

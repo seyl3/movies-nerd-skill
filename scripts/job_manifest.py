@@ -13,10 +13,10 @@ import re
 import stat
 import sys
 import uuid
-from urllib.parse import quote
 
-from _common import staging_roots
-from qbittorrent_api import QbtError, magnet_hash
+from _common import state_roots
+from qbittorrent_api import QbtError, magnet_hash, safe_magnet
+from torrent_metadata import TorrentMetadataError, checked_torrent_url
 
 MAX_MANIFEST_BYTES = 256 * 1024
 MAX_DEPTH = 8
@@ -25,7 +25,7 @@ SENSITIVE_KEY_RE = re.compile(
     r"(?:password|passwd|secret|token|api[_-]?key|cookie|authorization|credential)", re.I,
 )
 CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
-STATES = {"planned", "confirmed", "downloading", "stalled", "downloaded", "verified", "imported", "failed"}
+STATES = {"planned", "confirmed", "downloading", "stalled", "downloaded", "finalizing", "verified", "imported", "failed"}
 STEP_STATES = {"pending", "running", "complete", "skipped", "failed"}
 IMMUTABLE_KEYS = {"version", "job_id", "created_at", "kind", "identity"}
 DEFAULT_STEPS = {
@@ -35,8 +35,10 @@ DEFAULT_STEPS = {
     "transfer": "pending",
     "content_gate": "pending",
     "media_probe": "pending",
+    "enrichment": "pending",
     "subtitles": "pending",
     "library_import": "pending",
+    "cleanup": "pending",
 }
 EVENT_PATCHES = {
     "confirmed": {
@@ -74,9 +76,17 @@ EVENT_PATCHES = {
             "metadata_gate": "complete", "transfer": "running",
         },
     },
+    "enrichment-started": {
+        "state": "downloading",
+        "steps": {"enrichment": "running"},
+    },
     "downloaded": {
         "state": "downloaded",
         "steps": {"transfer": "complete"},
+    },
+    "finalizing": {
+        "state": "finalizing",
+        "steps": {"content_gate": "running"},
     },
     "verified": {
         "state": "verified",
@@ -84,7 +94,10 @@ EVENT_PATCHES = {
     },
     "imported": {
         "state": "imported",
-        "steps": {"subtitles": "complete", "library_import": "complete"},
+        "steps": {
+            "enrichment": "complete", "subtitles": "complete",
+            "library_import": "complete", "cleanup": "running",
+        },
     },
     "failed": {"state": "failed"},
 }
@@ -95,8 +108,10 @@ EVENT_FROM_STATES = {
     "replacement-started": {"downloading", "stalled"},
     "stalled": {"downloading"},
     "downloading": {"confirmed"},
+    "enrichment-started": {"downloading"},
     "downloaded": {"downloading"},
-    "verified": {"downloaded"},
+    "finalizing": {"downloaded"},
+    "verified": {"downloaded", "finalizing"},
     "imported": {"verified"},
     "failed": STATES - {"imported"},
 }
@@ -166,13 +181,14 @@ def read_json(path: str | Path, max_bytes: int = MAX_MANIFEST_BYTES) -> dict:
 def jobs_root(
     kind: str, environ: dict[str, str] | None = None, *, create: bool = True,
 ) -> Path:
-    movie_stage, series_stage = staging_roots(environ)
-    stage = movie_stage if kind == "movie" else series_stage
-    if stage.exists() and stage.is_symlink():
-        raise ManifestError("staging root must not be a symlink")
+    movie_state, series_state = state_roots(environ)
+    state = movie_state if kind == "movie" else series_state
+    if state.exists() and state.is_symlink():
+        raise ManifestError("Movies Nerd state root must not be a symlink")
     if create:
-        stage.mkdir(parents=True, exist_ok=True, mode=0o700)
-    root = stage / "jobs"
+        state.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(state, 0o700)
+    root = state / "jobs"
     if root.exists() and root.is_symlink():
         raise ManifestError("jobs directory must not be a symlink")
     if create:
@@ -246,7 +262,7 @@ def create_job(
     timestamp = now_utc()
     job_id = uuid.uuid4().hex
     value = {
-        "version": 1,
+        "version": 2,
         "job_id": job_id,
         "created_at": timestamp,
         "updated_at": timestamp,
@@ -258,6 +274,13 @@ def create_job(
         "destination": None,
         "artifacts": {},
         "cache": {},
+        "controller": {
+            "phase": "planned",
+            "attempt": 0,
+            "active_hash": None,
+            "standby_hash": None,
+            "tried_hashes": [],
+        },
     }
     if extra:
         forbidden = (IMMUTABLE_KEYS - {"identity"}).intersection(extra)
@@ -302,7 +325,7 @@ def merge_patch(current: dict, patch: dict, *, creating: bool = False) -> dict:
 def load_job(path: str | Path, environ: dict[str, str] | None = None) -> tuple[Path, dict]:
     checked = checked_job_path(path, environ)
     value = read_json(checked)
-    if value.get("version") != 1 or not isinstance(value.get("job_id"), str):
+    if value.get("version") != 2 or not isinstance(value.get("job_id"), str):
         raise ManifestError("unsupported or invalid job manifest")
     return checked, value
 
@@ -353,27 +376,23 @@ def transition_job(
     return update_job(path, patch, environ)
 
 
-def archive_failed_job(
+def remove_failed_job(
     path: str | Path, environ: dict[str, str] | None = None,
 ) -> dict:
-    """Move exact failed job state out of .incoming while keeping it recoverable."""
+    """Remove exact terminal failed-job state after payload cleanup."""
     checked, current = load_job(path, environ)
     if current.get("state") != "failed":
-        raise ManifestError("only a failed job can be archived")
-    stage = checked.parent.parent
-    library = stage.parent.parent
-    if stage.name != "Movies Nerd" or stage.parent.name != ".incoming":
-        raise ManifestError("failed job is outside the exact Movies Nerd staging layout")
-    archive = (
-        library / ".movies-nerd-trash" / "failed-jobs"
-        / f"{now_utc().replace(':', '-')}-{current['job_id'][:8]}"
-    )
-    archive.mkdir(mode=0o700, parents=True, exist_ok=False)
-    destination = archive / checked.name
-    os.replace(checked, destination)
+        raise ManifestError("only a failed job can be removed")
+    state = checked.parent.parent
+    if state.name != ".movies-nerd" or checked.parent.name != "jobs":
+        raise ManifestError("failed job is outside the exact Movies Nerd state layout")
+    trash = state / "trash" / current["job_id"]
+    if trash.exists():
+        raise ManifestError("failed job trash must be cleared before its manifest")
+    checked.unlink()
     sidecar = checked.with_name("._" + checked.name)
     if sidecar.is_file() and not sidecar.is_symlink():
-        os.replace(sidecar, archive / sidecar.name)
+        sidecar.unlink()
     try:
         checked.parent.rmdir()
     except OSError:
@@ -382,16 +401,7 @@ def archive_failed_job(
         jobs_sidecar = checked.parent.with_name("._" + checked.parent.name)
         if jobs_sidecar.is_file() and not jobs_sidecar.is_symlink():
             jobs_sidecar.unlink(missing_ok=True)
-    transfers = stage / "transfers"
-    try:
-        transfers.rmdir()
-    except OSError:
-        pass
-    else:
-        transfer_sidecar = transfers.with_name("._" + transfers.name)
-        if transfer_sidecar.is_file() and not transfer_sidecar.is_symlink():
-            transfer_sidecar.unlink(missing_ok=True)
-    return {"archived": True, "from": str(checked), "to": str(destination)}
+    return {"removed": True, "job": current["job_id"], "state_clean": not checked.exists()}
 
 
 def checked_release(value: object) -> dict:
@@ -401,7 +411,9 @@ def checked_release(value: object) -> dict:
         key: deepcopy(value.get(key))
         for key in (
             "title", "source", "provider", "size_bytes", "size", "resolution",
-            "seeders", "leechers", "score", "warnings", "magnet",
+            "seeders", "leechers", "score", "warnings", "magnet", "info_hash",
+            "torrent_url", "direct_metadata", "reported_peer_health",
+            "provider_reliability_bonus",
         )
     }
     if not str(fields["title"] or "").strip() or not str(fields["source"] or "").strip():
@@ -411,7 +423,7 @@ def checked_release(value: object) -> dict:
         seeders = int(fields["seeders"])
     except (TypeError, ValueError) as exc:
         raise ManifestError("search selection has invalid size or peer data") from exc
-    if size <= 0 or size > 100 * 1024 ** 3 or seeders <= 0:
+    if size <= 0 or size > 100 * 1024 ** 3 or seeders < 0:
         raise ManifestError("search selection is outside safety bounds")
     fields["size_bytes"] = size
     fields["seeders"] = seeders
@@ -419,10 +431,15 @@ def checked_release(value: object) -> dict:
         info_hash = magnet_hash(str(fields["magnet"] or ""))
     except (QbtError, ValueError) as exc:
         raise ManifestError("search selection has an invalid magnet") from exc
-    fields["magnet"] = (
-        f"magnet:?xt=urn:btih:{info_hash}&dn="
-        f"{quote(str(fields['title'])[:300], safe='')}"
-    )
+    fields["info_hash"] = info_hash
+    fields["magnet"] = safe_magnet(info_hash, str(fields["title"])[:300])
+    if fields.get("torrent_url"):
+        try:
+            fields["torrent_url"] = checked_torrent_url(str(fields["torrent_url"]))
+        except TorrentMetadataError as exc:
+            raise ManifestError("search selection has an invalid direct torrent URL") from exc
+    else:
+        fields["torrent_url"] = None
     validate_tree(fields)
     return fields
 
@@ -455,8 +472,8 @@ def record_search(
     raw_pool = selection.get("candidates")
     if raw_pool is None:
         raw_pool = [value for value in (selection.get("primary"), raw_backup) if value]
-    if not isinstance(raw_pool, list) or not 1 <= len(raw_pool) <= 3:
-        raise ManifestError("search selection must contain one to three race candidates")
+    if not isinstance(raw_pool, list) or not 1 <= len(raw_pool) <= 6:
+        raise ManifestError("search selection must contain one to six race candidates")
     candidate_pool = []
     hashes = set()
     for value in raw_pool:
@@ -472,6 +489,7 @@ def record_search(
         "release": primary,
         "backup_release": backup,
         "candidate_pool": candidate_pool,
+        "confirmation_envelope": selection.get("confirmation_envelope") or {},
         "steps": {"search": "complete"},
         "cache": {
             "search_summary": {
@@ -520,9 +538,9 @@ def main() -> int:
     transition.add_argument("--event", choices=tuple(EVENT_PATCHES), required=True)
     transition.add_argument("--reason")
     transition.add_argument("--torrent-hash")
-    archive = subparsers.add_parser("archive-failed")
-    archive.add_argument("job")
-    archive.add_argument("--commit", action="store_true")
+    remove_failed = subparsers.add_parser("remove-failed")
+    remove_failed.add_argument("job")
+    remove_failed.add_argument("--commit", action="store_true")
     args = parser.parse_args()
     try:
         if args.command == "create":
@@ -543,10 +561,10 @@ def main() -> int:
                 args.job, args.event, reason=args.reason, torrent_hash=args.torrent_hash,
             )
             print(json.dumps({"job": str(Path(args.job)), "manifest": redacted(value)}, ensure_ascii=False, indent=2))
-        elif args.command == "archive-failed":
+        elif args.command == "remove-failed":
             if not args.commit:
-                raise ManifestError("refusing to archive failed job without --commit")
-            print(json.dumps(archive_failed_job(args.job), ensure_ascii=False, indent=2))
+                raise ManifestError("refusing to remove failed job without --commit")
+            print(json.dumps(remove_failed_job(args.job), ensure_ascii=False, indent=2))
         else:
             _, value = load_job(args.job)
             print(json.dumps(value if args.raw else redacted(value), ensure_ascii=False, indent=2))

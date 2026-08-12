@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import json
 import re
 import shutil
@@ -14,18 +14,27 @@ import sys
 import time
 import unicodedata
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode, urlparse
+from urllib.parse import urlencode, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from _common import GIB
-from qbittorrent_api import QbtError, connected_client, magnet_hash
+from provider_health import HealthError, dead_hashes, provider_bonus, record_provider
+from qbittorrent_api import QbtError, connected_client, magnet_hash, safe_magnet
 from rank_releases import normalize
+from torrent_metadata import TorrentMetadataError, checked_torrent_url
 
-ALLOWED_API_HOSTS = {"api.knaben.org", "apibay.org", "magnetz.eu", "yts.gg"}
+ALLOWED_API_HOSTS = {"api.knaben.org", "apibay.org", "magnetz.eu", "movies-api.accel.li", "yts.gg"}
 MAX_RESPONSE_BYTES = 5 * 1024 * 1024
 MAX_RESULTS_PER_PROVIDER = 100
 CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 INFO_HASH_RE = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})")
+PROVIDER_LABELS = {
+    "knaben": "Knaben API",
+    "apibay": "APIBay",
+    "magnetz": "Magnetz API",
+    "yts": "YTS API",
+    "qbt_torznab": "qBittorrent/Torznab",
+}
 
 
 class SearchError(RuntimeError):
@@ -63,7 +72,7 @@ class AllowlistedRedirects(HTTPRedirectHandler):
 def fetch_json(url: str, timeout: float, payload: dict | None = None) -> object:
     checked_api_url(url)
     data = None
-    headers = {"Accept": "application/json", "User-Agent": "Movies-Nerd/1"}
+    headers = {"Accept": "application/json", "User-Agent": "Movies-Nerd/2"}
     if payload is not None:
         data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         headers["Content-Type"] = "application/json"
@@ -126,12 +135,14 @@ def safe_int(value: object, default: int = 0) -> int:
         return default
 
 
-def minimal_magnet(info_hash: object, title: object) -> str | None:
+def minimal_magnet(info_hash: object, title: object, *, trackers: bool = True) -> str | None:
     candidate = str(info_hash or "").strip()
     if not INFO_HASH_RE.fullmatch(candidate):
         return None
-    display = str(title or "torrent").strip()[:300] or "torrent"
-    return f"magnet:?xt=urn:btih:{candidate.lower()}&dn={quote(display, safe='')}"
+    try:
+        return safe_magnet(candidate, str(title or "torrent"), trackers=trackers)
+    except QbtError:
+        return None
 
 
 def sanitized_magnet(value: object, info_hash: object, title: object) -> str | None:
@@ -167,6 +178,7 @@ def normalize_knaben(payload: object) -> list[dict]:
             "source": str(item.get("tracker") or item.get("cachedOrigin") or "Knaben"),
             "provider": "Knaben API",
             "magnet": magnet,
+            "info_hash": magnet_hash(magnet),
         })
     return results
 
@@ -206,6 +218,7 @@ def normalize_apibay(payload: object) -> list[dict]:
             "source": "The Pirate Bay",
             "provider": "APIBay",
             "magnet": magnet,
+            "info_hash": magnet_hash(magnet),
         })
     return results
 
@@ -235,6 +248,7 @@ def normalize_magnetz(payload: object) -> list[dict]:
             "source": "Magnetz",
             "provider": "Magnetz API",
             "magnet": magnet,
+            "info_hash": magnet_hash(magnet),
         })
     return results
 
@@ -259,6 +273,7 @@ def normalize_yts(payload: object) -> list[dict]:
             continue
         movie_title = str(movie.get("title") or "").strip()
         year = safe_int(movie.get("year"))
+        imdb_code = str(movie.get("imdb_code") or "").strip().lower()
         torrents = movie.get("torrents") or []
         if not movie_title or not isinstance(torrents, list):
             continue
@@ -272,10 +287,18 @@ def normalize_yts(payload: object) -> list[dict]:
                 value for value in (movie_title, f"({year})" if year else "", quality, release_type, codec)
                 if value
             )
-            magnet = minimal_magnet(torrent.get("hash"), title)
+            info_hash = str(torrent.get("hash") or "").strip().lower()
+            magnet = minimal_magnet(info_hash, title)
             size = safe_int(torrent.get("size_bytes"))
             if not magnet or size <= 0:
                 continue
+            torrent_url = None
+            raw_url = str(torrent.get("url") or "").strip()
+            if raw_url:
+                try:
+                    torrent_url = checked_torrent_url(raw_url)
+                except TorrentMetadataError:
+                    torrent_url = None
             results.append({
                 "title": title,
                 "size": size,
@@ -284,13 +307,32 @@ def normalize_yts(payload: object) -> list[dict]:
                 "source": "YTS",
                 "provider": "YTS API",
                 "magnet": magnet,
+                "info_hash": info_hash,
+                "torrent_url": torrent_url,
+                "imdb_code": imdb_code if re.fullmatch(r"tt\d{7,10}", imdb_code) else None,
+                "direct_metadata": bool(torrent_url),
             })
     return results
 
 
-def search_yts(title: str, timeout: float) -> list[dict]:
-    url = "https://yts.gg/api/v2/list_movies.json?" + urlencode({"query_term": title, "limit": 50})
-    return normalize_yts(fetch_json(url, timeout))
+def search_yts(title: str, timeout: float, imdb_id: str | None = None) -> list[dict]:
+    query = imdb_id if imdb_id and re.fullmatch(r"tt\d{7,10}", imdb_id.lower()) else title
+    endpoints = (
+        "https://movies-api.accel.li/api/v2/list_movies.json",
+        "https://yts.gg/api/v2/list_movies.json",
+    )
+    started = time.monotonic()
+    errors = []
+    for endpoint in endpoints:
+        remaining = timeout - (time.monotonic() - started)
+        if remaining <= 0:
+            break
+        url = endpoint + "?" + urlencode({"query_term": query, "limit": 50})
+        try:
+            return normalize_yts(fetch_json(url, remaining))
+        except SearchError as exc:
+            errors.append(str(exc))
+    raise SearchError(errors[-1] if errors else "YTS API timed out")
 
 
 def normalize_qbt(payload: object) -> list[dict]:
@@ -314,6 +356,7 @@ def normalize_qbt(payload: object) -> list[dict]:
             "source": site or "qBittorrent search",
             "provider": "qBittorrent/Torznab",
             "magnet": magnet,
+            "info_hash": magnet_hash(magnet),
         })
     return results
 
@@ -379,7 +422,15 @@ def deduplicate(results: list[dict]) -> list[dict]:
         except QbtError:
             continue
         previous = selected.get(key)
-        if previous is None or item.get("seeders", 0) > previous.get("seeders", 0):
+        preferred = (
+            bool(item.get("torrent_url")),
+            safe_int(item.get("seeders")),
+        )
+        previous_preferred = (
+            bool(previous.get("torrent_url")) if previous else False,
+            safe_int(previous.get("seeders")) if previous else -1,
+        )
+        if previous is None or preferred > previous_preferred:
             selected[key] = item
     return list(selected.values())
 
@@ -407,16 +458,21 @@ def matches_requested_title(release_title: object, title: str, year: int | None)
 
 def usable_count(
     results: list[dict], title: str, year: int | None, max_bytes: int,
-    runtime_minutes: float | None,
+    runtime_minutes: float | None, excluded_hashes: set[str] | None = None,
 ) -> int:
+    excluded = excluded_hashes or set()
     usable = 0
     for item in results:
         ranked = normalize(item, max_bytes, runtime_minutes)
+        try:
+            info_hash = magnet_hash(str(item.get("magnet") or ""))
+        except QbtError:
+            continue
         if (
             matches_requested_title(item.get("title"), title, year)
             and ranked["eligible"]
             and ranked["magnet"]
-            and ranked["seeders"] > 0
+            and info_hash not in excluded
         ):
             usable += 1
     return usable
@@ -433,18 +489,30 @@ def source_key(value: object) -> str:
 
 def release_selection(
     results: list[dict], title: str, year: int | None, max_bytes: int,
-    runtime_minutes: float | None,
+    runtime_minutes: float | None, *, kind: str | None = None,
+    excluded_hashes: set[str] | None = None,
 ) -> dict:
+    excluded = excluded_hashes or set()
     candidates = []
+    bonuses: dict[str, float] = {}
     for item in results:
         ranked = normalize(item, max_bytes, runtime_minutes)
+        try:
+            info_hash = magnet_hash(str(item.get("magnet") or ""))
+        except QbtError:
+            continue
         if not (
             matches_requested_title(item.get("title"), title, year)
             and ranked["eligible"]
             and ranked["magnet"]
-            and ranked["seeders"] > 0
+            and info_hash not in excluded
         ):
             continue
+        provider = str(item.get("provider") or "")
+        if kind and provider not in bonuses:
+            bonuses[provider] = provider_bonus(kind, provider)
+        reliability = bonuses.get(provider, 0.0)
+        direct_bonus = 8.0 if item.get("torrent_url") else 0.0
         candidates.append({
             "title": ranked["title"],
             "source": ranked["source"],
@@ -454,9 +522,14 @@ def release_selection(
             "resolution": ranked["resolution"],
             "seeders": ranked["seeders"],
             "leechers": safe_int(item.get("leechers")),
-            "score": ranked["score"],
+            "score": round(ranked["score"] + reliability + direct_bonus, 2),
             "warnings": ranked["warnings"],
             "magnet": ranked["magnet"],
+            "info_hash": info_hash,
+            "torrent_url": item.get("torrent_url"),
+            "direct_metadata": bool(item.get("torrent_url")),
+            "reported_peer_health": "estimate",
+            "provider_reliability_bonus": reliability,
         })
     candidates.sort(key=lambda item: (item["score"], item["seeders"]), reverse=True)
     primary = candidates[0] if candidates else None
@@ -469,10 +542,14 @@ def release_selection(
         )
     compatible = []
     if primary:
+        envelope_max = min(
+            max_bytes,
+            max(primary["size_bytes"] + 512 * 1024 ** 2, int(primary["size_bytes"] * 1.2)),
+        )
         compatible = [
             item for item in candidates
             if item["resolution"] == primary["resolution"]
-            and item["size_bytes"] <= primary["size_bytes"]
+            and item["size_bytes"] <= envelope_max
         ]
     race_candidates = []
     seen_sources = set()
@@ -482,45 +559,78 @@ def release_selection(
             continue
         race_candidates.append(item)
         seen_sources.add(key)
-        if len(race_candidates) == 3:
+        if len(race_candidates) == 6:
             break
-    if len(race_candidates) < 3:
+    if len(race_candidates) < 6:
         selected_hashes = {magnet_hash(item["magnet"]) for item in race_candidates}
         for item in compatible:
             if magnet_hash(item["magnet"]) in selected_hashes:
                 continue
             race_candidates.append(item)
             selected_hashes.add(magnet_hash(item["magnet"]))
-            if len(race_candidates) == 3:
+            if len(race_candidates) == 6:
                 break
+    displayed_max = max((item["size_bytes"] for item in race_candidates), default=None)
     return {
         "primary": primary,
         "backup": backup,
         "candidates": race_candidates,
         "eligible_count": len(candidates),
+        "confirmation_envelope": {
+            "quality": primary.get("resolution") if primary else None,
+            "max_size_bytes": displayed_max,
+            "max_size": f"{displayed_max / GIB:.2f} GiB" if displayed_max else None,
+            "maximum_simultaneous_probes": 3,
+            "maximum_waves": 2,
+        },
     }
 
 
-def run_providers(providers: dict[str, object]) -> tuple[list[dict], dict]:
+def run_providers(providers: dict[str, object], timeout: float) -> tuple[list[dict], dict]:
     reports: dict[str, dict] = {}
     combined: list[dict] = []
-    with ThreadPoolExecutor(max_workers=len(providers)) as executor:
-        futures = {executor.submit(call): name for name, call in providers.items()}
-        for future in as_completed(futures):
+    started = time.monotonic()
+    executor = ThreadPoolExecutor(max_workers=len(providers))
+    future_started = {}
+    futures = {}
+    try:
+        for name, call in providers.items():
+            future = executor.submit(call)
+            futures[future] = name
+            future_started[future] = time.monotonic()
+        pending = set(futures)
+        while pending:
+            remaining = timeout - (time.monotonic() - started)
+            if remaining <= 0:
+                break
+            done, pending = wait(pending, timeout=min(0.1, remaining), return_when=FIRST_COMPLETED)
+            for future in done:
+                name = futures[future]
+                latency = round((time.monotonic() - future_started[future]) * 1000)
+                try:
+                    items = future.result()
+                    combined.extend(items)
+                    reports[name] = {"ok": True, "results": len(items), "latency_ms": latency}
+                except (SearchError, QbtError, OSError) as exc:
+                    reports[name] = {"ok": False, "error": str(exc)[:200], "latency_ms": latency}
+        for future in pending:
             name = futures[future]
-            try:
-                items = future.result()
-                combined.extend(items)
-                reports[name] = {"ok": True, "results": len(items)}
-            except (SearchError, QbtError, OSError) as exc:
-                reports[name] = {"ok": False, "error": str(exc)[:200]}
+            future.cancel()
+            reports[name] = {
+                "ok": False,
+                "error": "provider exceeded the shared search deadline",
+                "latency_ms": round(timeout * 1000),
+            }
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
     return combined, reports
 
 
 def search_all(
     query: str, timeout: float, series: bool, use_qbt: bool, *, title: str,
     year: int | None, max_bytes: int, runtime_minutes: float | None,
-    minimum_usable: int = 3,
+    minimum_usable: int = 3, imdb_id: str | None = None,
+    excluded_hashes: set[str] | None = None,
 ) -> tuple[list[dict], dict, bool]:
     started = time.monotonic()
     fast_timeout = min(3.5, timeout)
@@ -528,10 +638,13 @@ def search_all(
         "knaben": lambda: search_knaben(query, fast_timeout),
         "apibay": lambda: search_apibay(query, fast_timeout),
         "magnetz": lambda: search_magnetz(query, fast_timeout),
-        "yts": lambda: search_yts(title, fast_timeout),
-    })
+        "yts": lambda: search_yts(title, fast_timeout, imdb_id),
+    }, fast_timeout)
     combined = deduplicate(combined)
-    fast_selection = release_selection(combined, title, year, max_bytes, runtime_minutes)
+    fast_selection = release_selection(
+        combined, title, year, max_bytes, runtime_minutes,
+        excluded_hashes=excluded_hashes,
+    )
     early_success = (
         fast_selection["eligible_count"] >= minimum_usable
         and fast_selection["backup"] is not None
@@ -540,7 +653,7 @@ def search_all(
         remaining = max(0.5, timeout - (time.monotonic() - started))
         qbt_items, qbt_report = run_providers({
             "qbt_torznab": lambda: search_qbt(query, remaining, series),
-        })
+        }, remaining)
         combined = deduplicate(combined + qbt_items)
         reports.update(qbt_report)
     elif use_qbt:
@@ -558,6 +671,7 @@ def main() -> int:
     parser.add_argument("--year", type=int)
     parser.add_argument("--series", action="store_true")
     parser.add_argument("--runtime-min", type=float)
+    parser.add_argument("--imdb-id")
     parser.add_argument("--max-gib", type=float, default=15.0)
     parser.add_argument("--timeout", type=float, default=5.0)
     parser.add_argument("--no-qbt-search", action="store_true")
@@ -566,22 +680,44 @@ def main() -> int:
         parser.error("--timeout must be between 1 and 15 seconds")
     if not 0 < args.max_gib <= 100:
         parser.error("--max-gib must be between 0 and 100")
+    if args.imdb_id and not re.fullmatch(r"tt\d{7,10}", args.imdb_id.lower()):
+        parser.error("--imdb-id must look like tt1234567")
     query = checked_query(args.title, args.year)
     started = time.monotonic()
     max_bytes = int(args.max_gib * GIB)
+    kind = "series" if args.series else "movie"
+    try:
+        excluded = dead_hashes(kind)
+    except (HealthError, OSError, ValueError):
+        excluded = set()
     results, providers, early_success = search_all(
         query, args.timeout, args.series, not args.no_qbt_search,
         title=args.title, year=args.year, max_bytes=max_bytes,
         runtime_minutes=args.runtime_min,
+        imdb_id=args.imdb_id, excluded_hashes=excluded,
     )
-    selection = release_selection(results, args.title, args.year, max_bytes, args.runtime_min)
+    for name, report in providers.items():
+        if "latency_ms" not in report:
+            continue
+        try:
+            record_provider(
+                kind, PROVIDER_LABELS.get(name, name), ok=bool(report.get("ok")),
+                latency_ms=safe_int(report.get("latency_ms")), results=safe_int(report.get("results")),
+            )
+        except (HealthError, OSError, ValueError):
+            pass
+    selection = release_selection(
+        results, args.title, args.year, max_bytes, args.runtime_min,
+        kind=kind, excluded_hashes=excluded,
+    )
     usable = selection["eligible_count"]
     output = {
         "query": query,
         "request": {
             "title": args.title,
             "year": args.year,
-            "kind": "series" if args.series else "movie",
+            "kind": kind,
+            "imdb_id": args.imdb_id.lower() if args.imdb_id else None,
         },
         "elapsed_ms": round((time.monotonic() - started) * 1000),
         "providers": providers,
