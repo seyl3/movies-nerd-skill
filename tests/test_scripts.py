@@ -6,6 +6,7 @@ import io
 import json
 import os
 from pathlib import Path
+import ssl
 import sys
 import tempfile
 import unittest
@@ -33,6 +34,7 @@ import remux_mkv
 import search_releases
 import select_payload
 import skill_version
+import stremio_subtitles
 import subtitle_provider
 import validate_subtitle
 import write_nfo
@@ -819,18 +821,79 @@ class PolicyTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "not fully organized"):
                 finish_staging.verify_final_destination(final)
 
-    def test_subtitle_provider_asks_once_then_falls_back(self):
-        ask = subtitle_provider.plan("Example", 2024, "Example.2024.1080p", ["en", "fr"], False, {})
-        fallback = subtitle_provider.plan("Example", 2024, "Example.2024.1080p", ["en", "fr"], True, {})
-        self.assertEqual(ask["action"], "ask-user-once")
-        self.assertEqual(fallback["action"], "browser-fallback")
-        self.assertEqual(fallback["provider"], "Subtitle Cat")
+    def test_subtitle_provider_uses_no_key_service_without_prompting(self):
+        result = subtitle_provider.plan(
+            "Example", 2024, "Example.2024.1080p", ["en", "fr"], {},
+        )
+        self.assertEqual(result["action"], "use-stremio-opensubtitles")
+        self.assertEqual(result["provider"], "OpenSubtitles v3 for Stremio")
+        self.assertFalse(result["requires_api_key"])
+        self.assertNotIn("question", result)
 
     def test_subtitle_provider_uses_but_never_outputs_key(self):
         secret = "not-for-output"
-        result = subtitle_provider.plan("Example", 2024, None, ["en"], False, {"OPENSUBTITLES_API_KEY": secret})
+        result = subtitle_provider.plan(
+            "Example", 2024, None, ["en"], {"OPENSUBTITLES_API_KEY": secret},
+        )
         self.assertEqual(result["action"], "use-opensubtitles-api")
         self.assertNotIn(secret, json.dumps(result))
+
+    def test_no_key_subtitle_candidates_filter_language_and_hosts(self):
+        result = {
+            "subtitles": [
+                {
+                    "id": "101", "lang": "eng", "SubEncoding": "UTF-8",
+                    "url": "https://subs5.strem.io/en/download/subencoding-stremio-utf8/src-api/file/501",
+                },
+                {
+                    "id": "102", "lang": "fre", "SubEncoding": "CP1252",
+                    "url": "https://subs2.strem.io/en/download/subencoding-stremio-utf8/src-api/file/502?senc=cp1252",
+                },
+                {
+                    "id": "103", "lang": "eng", "SubEncoding": "UTF-8",
+                    "url": "https://ads.example/en/download/subencoding-stremio-utf8/src-api/file/503",
+                },
+                {
+                    "id": "104", "lang": "por", "SubEncoding": "UTF-8",
+                    "url": "https://subs5.strem.io/en/download/subencoding-stremio-utf8/src-api/file/504",
+                },
+            ],
+        }
+        found = stremio_subtitles.candidates(result, ["en", "fr"], 10)
+        self.assertEqual([item["subtitle_id"] for item in found], ["101", "102"])
+        self.assertEqual([item["language"] for item in found], ["en", "fr"])
+        self.assertTrue(all("url" not in item for item in found))
+
+    def test_no_key_subtitle_service_rejects_unapproved_download_urls(self):
+        for url in (
+            "http://subs5.strem.io/en/download/subencoding-stremio-utf8/src-api/file/1",
+            "https://strem.io/en/download/subencoding-stremio-utf8/src-api/file/1",
+            "https://subs5.strem.io/other/file/1",
+            "https://subs5.strem.io/en/download/subencoding-stremio-utf8/src-api/file/1?next=https://bad.example",
+        ):
+            with self.assertRaises(stremio_subtitles.StremioSubtitleError):
+                stremio_subtitles.checked_download_url(url)
+
+    def test_no_key_subtitle_series_content_id_is_episode_specific(self):
+        self.assertEqual(
+            stremio_subtitles.content_id("series", "tt1234567", 2, 4),
+            "tt1234567:2:4",
+        )
+        with self.assertRaises(stremio_subtitles.StremioSubtitleError):
+            stremio_subtitles.content_id("series", "tt1234567", None, None)
+
+    def test_no_key_subtitle_service_uses_system_trust_fallback(self):
+        payload = json.dumps({"subtitles": []}).encode("utf-8")
+        verification_error = ssl.SSLCertVerificationError(1, "untrusted local CA")
+        url_error = __import__("urllib.error").error.URLError(verification_error)
+        with (
+            patch.object(stremio_subtitles, "build_opener") as opener,
+            patch.object(stremio_subtitles, "system_curl", return_value=payload) as curl,
+        ):
+            opener.return_value.open.side_effect = url_error
+            result = stremio_subtitles.service_json("movie", "tt1234567")
+        self.assertEqual(result, {"subtitles": []})
+        self.assertEqual(curl.call_args.args[1:], (stremio_subtitles.MAX_JSON, 20, "application/json"))
 
     def test_content_gate_rejects_renamed_executable_and_archive(self):
         with tempfile.TemporaryDirectory() as raw:

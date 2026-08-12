@@ -45,7 +45,7 @@ def api_key(environ: dict[str, str] | None = None) -> str:
     values = os.environ if environ is None else environ
     key = values.get("OPENSUBTITLES_API_KEY", "").strip()
     if not key or len(key) > 512 or CONTROL_RE.search(key):
-        raise SubtitleApiError("OPENSUBTITLES_API_KEY is missing or invalid; use subtitle_provider.py for the no-key fallback")
+        raise SubtitleApiError("OPENSUBTITLES_API_KEY is missing or invalid; use stremio_subtitles.py for the automatic no-key route")
     return key
 
 
