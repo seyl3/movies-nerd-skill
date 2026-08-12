@@ -23,10 +23,13 @@ sys.path.insert(0, str(SCRIPTS))
 
 import _common
 import acquire
+import batch_jobs
 import finalization_queue
 import finalize_job
+import finalize_series
 import finish_staging
 import job_manifest
+import media_probe
 import monitor_download
 import provider_health
 import prepare_job
@@ -216,6 +219,9 @@ class HealthAndStateTests(unittest.TestCase):
                 job_path = Path(result["job"])
                 _, job = job_manifest.load_job(job_path)
             self.assertTrue(result["prepared"])
+            self.assertTrue(result["authorized"])
+            self.assertNotIn("confirmation", result)
+            self.assertEqual(job["state"], "confirmed")
             self.assertEqual(job["identity"]["ids"]["imdb"], "tt1234567")
             self.assertEqual(len(job["candidate_pool"]), 2)
             self.assertFalse(any(job_path.parent.glob("*search*.json")))
@@ -333,6 +339,47 @@ class RaceAndMonitorV2Tests(unittest.TestCase):
 
 
 class ControllerAndCleanupTests(unittest.TestCase):
+    def test_batch_runner_limits_concurrency_and_preserves_order(self):
+        with tempfile.TemporaryDirectory() as raw:
+            env = roots(Path(raw))
+            with patch.dict(os.environ, env, clear=False):
+                paths = [job_manifest.create_job("movie", f"Example {index}", 2024) for index in range(4)]
+                active = 0
+                maximum = 0
+
+                def runner(path, **_kwargs):
+                    nonlocal active, maximum
+                    active += 1
+                    maximum = max(maximum, active)
+                    time.sleep(0.02)
+                    active -= 1
+                    return {"ready": True, "title": path.stem}
+
+                result = batch_jobs.run_many(paths, concurrency=2, runner=runner)
+            self.assertEqual(maximum, 2)
+            self.assertEqual(result["ready"], 4)
+            self.assertEqual([item["job"] for item in result["jobs"]], [str(path) for path in paths])
+
+    def test_foreground_runner_dispatches_series_finalizer(self):
+        with tempfile.TemporaryDirectory() as raw:
+            env = roots(Path(raw))
+            with patch.dict(os.environ, env, clear=False):
+                path = job_manifest.create_job("series", "Example", 2024)
+                job_manifest.update_job(path, {
+                    "state": "downloaded",
+                    "enrichment_tasks": {
+                        name: {"status": "complete"}
+                        for name in finalization_queue.SERIES_TASKS
+                    },
+                })
+                with (
+                    patch.object(acquire, "run", return_value={"downloaded": True}),
+                    patch.object(run_job, "finalize_series", return_value={"ready": True}) as finish,
+                ):
+                    result = run_job.run(path, artifact_wait_seconds=0)
+            self.assertTrue(result["ready"])
+            finish.assert_called_once()
+
     def test_appledouble_hygiene_removes_only_scoped_sidecars(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw) / "job"
@@ -549,6 +596,119 @@ class ControllerAndCleanupTests(unittest.TestCase):
             self.assertIn("Example (2024).png", files)
             self.assertIn("Example (2024) [480p].en.srt", files)
             self.assertIn("Example (2024) [480p].fr.srt", files)
+            self.assertFalse(path.exists())
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg required")
+    def test_downloaded_series_finalizes_special_multi_episode_and_cleans(self):
+        with tempfile.TemporaryDirectory() as raw:
+            env = roots(Path(raw))
+            with patch.dict(os.environ, env, clear=False):
+                path = job_manifest.create_job(
+                    "series", "Example Show", 2024,
+                    {"identity": {"ids": {"imdb": "tt1234567"}}},
+                )
+                job_manifest.update_job(path, {"state": "downloading"})
+                _, job = job_manifest.load_job(path)
+                finalization_queue.start_all(path)
+                root = finalization_queue.artifact_root(job)
+                metadata = root / "metadata.json"
+                metadata.write_text(json.dumps({
+                    "show": {
+                        "title": "Example Show", "year": 2024,
+                        "plot": "Test show.", "uniqueids": {"imdb": "tt1234567"},
+                        "default_uniqueid": "imdb",
+                    },
+                    "episodes": [{
+                        "source": "Example.Show.S00E01E02.mkv",
+                        "season": 0, "episode": 1, "episode_end": 2,
+                        "title": "The Special", "plot": "A combined special.",
+                    }],
+                }), encoding="utf-8")
+                poster = root / "poster.jpg"
+                subprocess.run([
+                    "ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+                    "color=size=32x32:duration=0.1", "-frames:v", "1", str(poster),
+                ], check=True)
+                shutil.copy2(poster, root / "fanart.jpg")
+                shutil.copy2(poster, root / "season00-poster.jpg")
+                subtitle_text = "\n\n".join([
+                    "1\n00:00:00,000 --> 00:00:00,300\nOne",
+                    "2\n00:00:00,350 --> 00:00:00,650\nTwo",
+                    "3\n00:00:00,700 --> 00:00:01,000\nThree",
+                    "4\n00:00:01,050 --> 00:00:01,350\nFour",
+                    "5\n00:00:01,400 --> 00:00:01,900\nFive",
+                ]) + "\n"
+                en = root / "special.en.srt"
+                fr = root / "special.fr.srt"
+                en.write_text(subtitle_text, encoding="utf-8")
+                fr.write_text(subtitle_text, encoding="utf-8")
+                for task, artifact in (
+                    ("metadata", metadata), ("artwork", poster),
+                    ("subtitle-en", en), ("subtitle-fr", fr),
+                ):
+                    finalization_queue.mark(path, task, "complete", artifact=artifact)
+                finalization_queue.mark(path, "destination", "complete", note="prepared")
+
+                info_hash = "d" * 40
+                transfer = _common.stage_for_kind("series") / "transfers" / info_hash
+                transfer.mkdir(parents=True)
+                media = transfer / "Example.Show.S00E01E02.mkv"
+                subprocess.run([
+                    "ffmpeg", "-v", "error", "-y",
+                    "-f", "lavfi", "-i", "color=size=320x180:rate=25:duration=2",
+                    "-f", "lavfi", "-i", "sine=frequency=1000:duration=2",
+                    "-c:v", "mpeg4", "-c:a", "aac", "-shortest", str(media),
+                ], check=True)
+                probe = media_probe.probe_media(media)
+                report = {
+                    "safe_to_extract_selected": True,
+                    "cleanup_required": False,
+                    "selected": [{
+                        "path": media.name, "probe": probe,
+                        "duration_seconds": probe["summary"]["duration_seconds"],
+                    }],
+                }
+                job_manifest.update_job(path, {
+                    "state": "downloaded",
+                    "controller": {"active_hash": info_hash, "tried_hashes": [info_hash]},
+                    "artifacts": {"torrent_hash": info_hash},
+                })
+
+                class Client:
+                    present = True
+
+                    def json(self, endpoint):
+                        if endpoint.startswith("torrents/info"):
+                            return [{
+                                "hash": info_hash, "save_path": str(transfer),
+                                "tags": "movies-nerd,series",
+                            }] if self.present else []
+                        raise AssertionError(endpoint)
+
+                    def request(self, endpoint, _fields=None):
+                        if endpoint == "torrents/delete":
+                            self.present = False
+                        return b"Ok."
+
+                client = Client()
+                with (
+                    patch.object(finalize_series, "connected_client", return_value=client),
+                    patch.object(finalize_series, "scan_payload", return_value=report),
+                    patch.object(finish_staging, "connected_client", return_value=client),
+                ):
+                    result = finalize_series.finalize(path)
+                destination = Path(result["destination"])
+                episode_files = {item.name for item in (destination / "Season 00").iterdir()}
+            self.assertTrue(result["ready"])
+            self.assertTrue(result["cleanup"]["clean"])
+            self.assertEqual(result["episodes"], 1)
+            self.assertTrue((destination / "tvshow.nfo").is_file())
+            self.assertTrue((destination / "poster.jpg").is_file())
+            self.assertTrue((destination / "fanart.jpg").is_file())
+            self.assertTrue((destination / "season00-poster.jpg").is_file())
+            self.assertIn("Example Show (2024) - S00E01-E02 - The Special [480p].mkv", episode_files)
+            self.assertIn("Example Show (2024) - S00E01-E02 - The Special [480p].en.srt", episode_files)
+            self.assertIn("Example Show (2024) - S00E01-E02 - The Special [480p].fr.srt", episode_files)
             self.assertFalse(path.exists())
     def test_resumed_job_removes_every_duplicate_candidate(self):
         with tempfile.TemporaryDirectory() as raw:

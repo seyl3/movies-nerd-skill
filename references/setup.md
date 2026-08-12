@@ -97,7 +97,7 @@ export MOVIES_NERD_SERIES_ROOT='/absolute/path/to/Series'
 
 If the user chooses the defaults, use `~/Documents/Movies` and `~/Documents/Series`. Staging is always `.incoming/Movies Nerd` inside the applicable selected root. When both roots are known they must be distinct, non-nested directories; never use a home directory, filesystem root, or shared volume root as a library root. Do not require a path merely because the unrelated library root is unknown.
 
-Create or mount the selected roots before the first transfer. Movies Nerd creates only the hidden staging subdirectory when a confirmed transfer is prepared.
+Create or mount the selected roots before the first transfer. Movies Nerd creates only the hidden staging subdirectory when an authorized transfer is prepared.
 
 ## Verify the machine
 

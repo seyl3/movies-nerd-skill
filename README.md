@@ -1,8 +1,8 @@
 # Movies Nerd
 
-Movies Nerd is an opinionated all-in-one Codex skill for nontechnical film fans. Ask for a movie or series, approve one compact quality/size choice, and it stays with the job until the library entry is ready.
+Movies Nerd is an opinionated all-in-one Codex skill for nontechnical film fans. Ask for one title or a batch and it starts automatically, then stays with every job until the library entries are ready.
 
-Version: **2.2.1**
+Version: **2.3.0**
 
 **Currently recommended:** use **GPT-5.6 Sol** with **High** reasoning.
 
@@ -11,6 +11,8 @@ Version: **2.2.1**
 - Searches YTS, Knaben, APIBay, Magnetz, configured Torznab providers, then EXT only as a last resort.
 - Opens qBittorrent, compares several candidates briefly, keeps only the best one, deletes duplicate partial downloads, and replaces a later dead or slow transfer automatically.
 - Keeps the movie job attached through download, finalization, cleanup, and the ready handoff instead of stopping after “downloading.”
+- Handles batches with two concurrent downloads by default, without asking for a separate confirmation per title.
+- Fully organizes series into show/season folders with show and episode NFOs, show/season artwork, per-episode English/French subtitles, specials, and multi-episode files.
 - Prefers efficient 4K up to 15 GiB or space-efficient 1080p, MKV, original audio, and no extras.
 - Adds clean names, NFO metadata, posters, fanart, track labels, and English/French subtitles through a no-key, no-browser default provider.
 - Salvages verified video when separate release junk appears.

@@ -13,7 +13,7 @@ Read this reference when `scripts/check_subtitles.py` reports missing English or
 
 - Search by authoritative IMDb ID when available, plus `en,fr` and the exact release name or canonical title.
 - Show the candidate language, release name, hearing-impaired or forced status, download count, and file ID before downloading.
-- Download only the confirmed file ID into the matching Movies Nerd staging root with a final `.en.srt` or `.fr.srt` name.
+- Download only the selected file ID into the matching Movies Nerd staging root with a final `.en.srt` or `.fr.srt` name.
 - Respect the provider's current quota and rate-limit response. Do not retry around a quota or IP restriction.
 
 ## No-key Stremio path

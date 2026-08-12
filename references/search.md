@@ -1,6 +1,6 @@
 # Fast search and live candidate selection
 
-Treat speed as a correctness requirement. Under a healthy connection, target a useful exact-title result within five seconds and first verified swarm activity within thirty seconds after confirmation.
+Treat speed as a correctness requirement. Under a healthy connection, target a useful exact-title result within five seconds and first verified swarm activity within thirty seconds after the request.
 
 ## Discovery
 
@@ -11,15 +11,15 @@ Treat speed as a correctness requirement. Under a healthy connection, target a u
 5. Preserve up to six same-quality candidates within the displayed maximum-size envelope: two hidden waves of at most three simultaneous probes. Prefer source diversity, then distinct hashes.
 6. Use EXT only when every API candidate is unsuitable or the user explicitly requests it. Never open EXT merely to compare against a usable API result.
 
-## Live selection after confirmation
+## Live selection after request authorization
 
-After confirmation, run `scripts/run_job.py --job <manifest> --commit` for a movie, or keep `scripts/acquire.py --job <manifest> --commit` foreground for a series. It performs the qBittorrent preflight, opens the app when needed, validates metadata, and probes actual swarm performance.
+Run `scripts/run_job.py --job <manifest> --commit` for either a movie or series. It performs the qBittorrent preflight, opens the app when needed, validates metadata, probes actual swarm performance, and completes the correct finalizer.
 
 - Probe at most three candidates together, capped at 2 MiB/s each and roughly 16 MiB of downloaded probe data.
 - Score actual downloaded-byte growth, median speed, availability, connected peers, metadata latency, then discovery score.
 - Continue only the best live candidate. Permanently remove the second-best and every other candidate, including their partial data, as soon as the bounded comparison has enough evidence and never later than one minute. Multiple candidates may transfer only during this short comparison; never keep a stopped or downloading duplicate afterward.
 - On resume, inspect the exact hashes recorded for the job and remove any non-winner left by an older run before monitoring continues.
-- If the first wave is dead, probe the second wave. If the confirmed pool is exhausted, perform one fresh API search inside the same quality and size envelope without asking again.
+- If the first wave is dead, probe the second wave. If the authorized pool is exhausted, perform one fresh API search inside the same quality and size envelope without asking.
 - Never reveal candidate churn, provider failures, hashes, or probe details to the user.
 
 ## Provider rules
