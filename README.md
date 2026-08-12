@@ -2,7 +2,7 @@
 
 Movies Nerd is an opinionated all-in-one Codex skill for nontechnical film fans. Ask for a movie or series, approve one compact quality/size choice, and it stays with the job until the library entry is ready.
 
-Version: **2.1.0**
+Version: **2.2.0**
 
 ## What it does
 
