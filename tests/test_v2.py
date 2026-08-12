@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import base64
 from contextlib import redirect_stdout
 import io
 import json
@@ -8,6 +9,8 @@ import os
 from pathlib import Path
 import stat
 import ssl
+import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -21,10 +24,13 @@ sys.path.insert(0, str(SCRIPTS))
 import _common
 import acquire
 import finalization_queue
+import finalize_job
 import finish_staging
 import job_manifest
 import monitor_download
 import provider_health
+import prepare_job
+import run_job
 import qbittorrent_api as qbt
 import race_candidates
 import search_releases
@@ -189,6 +195,44 @@ class SearchV2Tests(unittest.TestCase):
 
 
 class HealthAndStateTests(unittest.TestCase):
+    def test_prepare_job_searches_and_records_without_temporary_json(self):
+        with tempfile.TemporaryDirectory() as raw:
+            env = roots(Path(raw))
+            items = [candidate("a" * 40), candidate("b" * 40, "backup")]
+            with (
+                patch.dict(os.environ, env, clear=False),
+                patch.object(prepare_job, "dead_hashes", return_value=set()),
+                patch.object(
+                    prepare_job, "search_all",
+                    return_value=(items, {"yts": {"ok": True, "results": 2, "latency_ms": 25}}, True),
+                ),
+                patch.object(prepare_job, "record_provider"),
+            ):
+                result = prepare_job.prepare(
+                    title="Example", year=2024, kind="movie",
+                    runtime_minutes=100, imdb_id="tt1234567",
+                    max_gib=15, timeout=5,
+                )
+                job_path = Path(result["job"])
+                _, job = job_manifest.load_job(job_path)
+            self.assertTrue(result["prepared"])
+            self.assertEqual(job["identity"]["ids"]["imdb"], "tt1234567")
+            self.assertEqual(len(job["candidate_pool"]), 2)
+            self.assertFalse(any(job_path.parent.glob("*search*.json")))
+
+    def test_inline_json_and_authoritative_ids_are_supported(self):
+        value = job_manifest.read_json('{"cache":{"runtime_minutes":121}}')
+        self.assertEqual(value["cache"]["runtime_minutes"], 121)
+        with tempfile.TemporaryDirectory() as raw:
+            env = roots(Path(raw))
+            path = job_manifest.create_job(
+                "movie", "Example", 2024,
+                {"identity": {"ids": {"imdb": "tt1234567"}}},
+                environ=env,
+            )
+            _, job = job_manifest.load_job(path, env)
+            self.assertEqual(job["identity"]["ids"]["imdb"], "tt1234567")
+
     def test_provider_health_is_private_and_dead_hash_expires(self):
         with tempfile.TemporaryDirectory() as raw:
             env = roots(Path(raw))
@@ -289,6 +333,223 @@ class RaceAndMonitorV2Tests(unittest.TestCase):
 
 
 class ControllerAndCleanupTests(unittest.TestCase):
+    def test_appledouble_hygiene_removes_only_scoped_sidecars(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw) / "job"
+            nested = root / "nested"
+            nested.mkdir(parents=True)
+            keep = nested / "movie.mkv"
+            keep.write_bytes(b"video")
+            sidecar = nested / "._movie.mkv"
+            sidecar.write_bytes(b"AppleDouble")
+            removed = _common.clean_appledouble_tree(root)
+            self.assertEqual(removed, [str(sidecar)])
+            self.assertTrue(keep.exists())
+            self.assertFalse(sidecar.exists())
+
+    def test_acquire_help_is_compact(self):
+        completed = subprocess.run(
+            [sys.executable, str(SCRIPTS / "acquire.py"), "--help"],
+            check=True, text=True, capture_output=True,
+        )
+        self.assertLess(len(completed.stdout), 2_000)
+        self.assertIn("0..86400", completed.stdout)
+
+    def test_slow_transfer_replaces_candidate_without_stopping_controller(self):
+        with tempfile.TemporaryDirectory() as raw:
+            env = roots(Path(raw))
+            with patch.dict(os.environ, env, clear=False):
+                path = job_manifest.create_job("movie", "Example", 2024)
+                first = candidate("a" * 40)
+                second = candidate("b" * 40, "backup")
+                job_manifest.update_job(path, {
+                    "state": "downloading", "release": first,
+                    "candidate_pool": [first, second],
+                    "controller": {
+                        "active_hash": "a" * 40,
+                        "tried_hashes": ["a" * 40],
+                    },
+                    "artifacts": {"torrent_hash": "a" * 40},
+                })
+
+                class Client:
+                    def request(self, *_args, **_kwargs):
+                        return b"Ok."
+
+                slow = {
+                    "hash": "a" * 40, "state": "downloading", "progress": 0.1,
+                    "downloaded": 100, "dlspeed": 1_000, "availability": 1.0,
+                }
+                complete = {
+                    "hash": "b" * 40, "state": "uploading", "progress": 1.0,
+                    "downloaded": 2_000_000_000, "dlspeed": 0, "availability": 1.0,
+                }
+                samples = iter([
+                    monitor_download.to_sample(slow, 0),
+                    monitor_download.to_sample(slow, 1),
+                    monitor_download.to_sample(complete, 2),
+                ])
+                sync_values = iter([(1, slow), (2, slow), (3, complete)])
+
+                def replace(job_path, _job, _client, _old):
+                    job_manifest.transition_job(job_path, "replacement-started")
+                    job_manifest.transition_job(
+                        job_path, "downloading", torrent_hash="b" * 40,
+                        release=second,
+                    )
+                    updated = job_manifest.update_job(job_path, {
+                        "controller": {
+                            "active_hash": "b" * 40,
+                            "tried_hashes": ["a" * 40, "b" * 40],
+                        },
+                    })
+                    return "b" * 40, updated
+
+                with (
+                    patch.object(acquire, "connected_client", return_value=Client()),
+                    patch.object(acquire, "preflight", return_value={"ready": True}),
+                    patch.object(acquire, "torrent_info", return_value=slow),
+                    patch.object(acquire, "enforce_single_transfer", side_effect=lambda _p, j, _c, _h: j),
+                    patch.object(acquire, "request_finalization"),
+                    patch.object(acquire, "sync_torrent", side_effect=lambda *_args: next(sync_values)),
+                    patch.object(acquire, "to_sample", side_effect=lambda _info: next(samples)),
+                    patch.object(acquire, "replace_active", side_effect=replace) as failover,
+                    patch.object(acquire, "DEFAULT_LOW_SPEED_SECONDS", 1),
+                    patch.object(acquire, "DEFAULT_LOW_SPEED_BPS", 256 * 1024),
+                    patch.object(acquire.time, "sleep"),
+                    redirect_stdout(io.StringIO()),
+                ):
+                    result = acquire.run(path, poll_seconds=2)
+            self.assertTrue(result["downloaded"])
+            failover.assert_called_once()
+
+    def test_finalization_requests_real_work_instead_of_claiming_it_started(self):
+        with tempfile.TemporaryDirectory() as raw:
+            env = roots(Path(raw))
+            with patch.dict(os.environ, env, clear=False):
+                path = job_manifest.create_job("movie", "Example", 2024)
+                job_manifest.update_job(path, {"state": "downloading"})
+                plan = finalization_queue.start_all(path)
+                self.assertTrue(Path(plan["artifact_root"]).is_dir())
+                self.assertTrue(all(item["status"] == "requested" for item in plan["tasks"]))
+
+    def test_foreground_runner_reaches_finalizer_and_releases_lock(self):
+        with tempfile.TemporaryDirectory() as raw:
+            env = roots(Path(raw))
+            with patch.dict(os.environ, env, clear=False):
+                path = job_manifest.create_job("movie", "Example", 2024)
+                job_manifest.update_job(path, {
+                    "state": "downloaded",
+                    "enrichment_tasks": {
+                        name: {"status": "complete"}
+                        for name in finalization_queue.MOVIE_TASKS
+                    },
+                })
+                with (
+                    patch.object(acquire, "run", return_value={"downloaded": True}),
+                    patch.object(run_job, "finalize", return_value={"ready": True}) as finish,
+                ):
+                    result = run_job.run(path, artifact_wait_seconds=0)
+                _, job = job_manifest.load_job(path)
+                lock = path.parent.parent / "locks" / f"{job['job_id']}.lock"
+            self.assertTrue(result["ready"])
+            self.assertFalse(lock.exists())
+            finish.assert_called_once()
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg required")
+    def test_downloaded_movie_finalizes_and_cleans_end_to_end(self):
+        with tempfile.TemporaryDirectory() as raw:
+            env = roots(Path(raw))
+            with patch.dict(os.environ, env, clear=False):
+                path = job_manifest.create_job(
+                    "movie", "Example", 2024,
+                    {"identity": {"ids": {"imdb": "tt1234567"}}},
+                )
+                job_manifest.update_job(path, {"state": "downloading"})
+                _, job = job_manifest.load_job(path)
+                finalization_queue.start_all(path)
+                root = finalization_queue.artifact_root(job)
+                metadata = root / "metadata.json"
+                metadata.write_text(json.dumps({
+                    "title": "Example", "year": 2024,
+                    "directors": ["Director"], "plot": "Test movie.",
+                    "uniqueids": {"imdb": "tt1234567"},
+                    "default_uniqueid": "imdb",
+                    "letterboxd_url": "https://letterboxd.com/film/example/",
+                    "senscritique_url": "https://www.senscritique.com/film/example/123",
+                    "recommendations": [],
+                }), encoding="utf-8")
+                poster = root / "poster.png"
+                poster.write_bytes(base64.b64decode(
+                    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Z8l8AAAAASUVORK5CYII="
+                ))
+                subtitle_text = "\n\n".join([
+                    "1\n00:00:00,000 --> 00:00:00,300\nOne",
+                    "2\n00:00:00,350 --> 00:00:00,650\nTwo",
+                    "3\n00:00:00,700 --> 00:00:01,000\nThree",
+                    "4\n00:00:01,050 --> 00:00:01,350\nFour",
+                    "5\n00:00:01,400 --> 00:00:01,900\nFive",
+                ]) + "\n"
+                en = root / "example.en.srt"
+                fr = root / "example.fr.srt"
+                en.write_text(subtitle_text, encoding="utf-8")
+                fr.write_text(subtitle_text, encoding="utf-8")
+                for task, artifact in (
+                    ("metadata", metadata), ("artwork", poster),
+                    ("subtitle-en", en), ("subtitle-fr", fr),
+                ):
+                    finalization_queue.mark(path, task, "complete", artifact=artifact)
+                for task in ("destination", "film-links", "recommendations"):
+                    finalization_queue.mark(path, task, "complete", note="prepared")
+
+                info_hash = "a" * 40
+                transfer = _common.stage_for_kind("movie") / "transfers" / info_hash
+                transfer.mkdir(parents=True)
+                media = transfer / "Example.mkv"
+                subprocess.run([
+                    "ffmpeg", "-v", "error", "-y",
+                    "-f", "lavfi", "-i", "color=size=320x180:rate=25:duration=2",
+                    "-f", "lavfi", "-i", "sine=frequency=1000:duration=2",
+                    "-c:v", "mpeg4", "-c:a", "aac", "-shortest", str(media),
+                ], check=True)
+                job_manifest.update_job(path, {
+                    "state": "downloaded",
+                    "controller": {"active_hash": info_hash, "tried_hashes": [info_hash]},
+                    "artifacts": {"torrent_hash": info_hash},
+                })
+
+                class Client:
+                    present = True
+
+                    def json(self, endpoint):
+                        if endpoint.startswith("torrents/info"):
+                            return [{
+                                "hash": info_hash, "save_path": str(transfer),
+                                "tags": "movies-nerd,movie",
+                            }] if self.present else []
+                        raise AssertionError(endpoint)
+
+                    def request(self, endpoint, _fields=None):
+                        if endpoint == "torrents/delete":
+                            self.present = False
+                        return b"Ok."
+
+                client = Client()
+                with (
+                    patch.object(finalize_job, "connected_client", return_value=client),
+                    patch.object(finish_staging, "connected_client", return_value=client),
+                ):
+                    result = finalize_job.finalize(path)
+                destination = Path(result["destination"])
+                files = {item.name for item in destination.iterdir()}
+            self.assertTrue(result["ready"])
+            self.assertTrue(result["cleanup"]["clean"])
+            self.assertIn("Example (2024) [480p].mkv", files)
+            self.assertIn("Example (2024) [480p].nfo", files)
+            self.assertIn("Example (2024).png", files)
+            self.assertIn("Example (2024) [480p].en.srt", files)
+            self.assertIn("Example (2024) [480p].fr.srt", files)
+            self.assertFalse(path.exists())
     def test_resumed_job_removes_every_duplicate_candidate(self):
         with tempfile.TemporaryDirectory() as raw:
             env = roots(Path(raw))
@@ -451,7 +712,7 @@ class ControllerAndCleanupTests(unittest.TestCase):
                 _, job = job_manifest.load_job(path)
                 with (
                     patch.object(acquire, "torrent_info", return_value={"hash": "b" * 40}),
-                    patch.object(acquire, "remove_quietly"),
+                    patch.object(acquire, "remove_and_verify"),
                     patch.object(acquire, "command_start", return_value={"started": True}),
                     patch.object(acquire, "record_hash"),
                 ):

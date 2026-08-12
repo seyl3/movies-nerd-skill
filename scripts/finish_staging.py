@@ -11,7 +11,7 @@ import shutil
 import stat
 import sys
 
-from _common import library_roots, staging_roots, state_roots
+from _common import clean_appledouble_tree, library_roots, staging_roots, state_roots
 from job_manifest import ManifestError, load_job
 from payload_safety import IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
 from qbittorrent_api import QbtError, connected_client, torrent_info
@@ -152,6 +152,7 @@ def clean_completed_job(
     destination: Path, staged: list[Path], job_path: Path,
 ) -> dict:
     library, stage, state = library_for(destination)
+    clean_appledouble_tree(destination)
     final = verify_final_destination(destination)
     checked_job, job = load_job(job_path)
     if job.get("state") != "imported":
@@ -174,11 +175,14 @@ def clean_completed_job(
 
     for target in sorted(targets, key=lambda path: len(path.parts), reverse=True):
         remove_path(target)
+    clean_appledouble_tree(stage)
+    clean_appledouble_tree(state)
     for target in state_targets:
         if target.exists():
             remove_path(target)
     prune_empty(stage)
     prune_staging_root(stage)
+    clean_appledouble_tree(state)
     prune_empty(state)
 
     leftovers = [str(path) for path in targets + state_targets if path.exists() or path.is_symlink()]
@@ -199,7 +203,7 @@ def clean_completed_job(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--destination", type=Path, required=True)
-    parser.add_argument("--staged", type=Path, action="append", required=True)
+    parser.add_argument("--staged", type=Path, action="append", default=[])
     parser.add_argument("--job", type=Path, required=True)
     parser.add_argument("--commit", action="store_true")
     args = parser.parse_args()

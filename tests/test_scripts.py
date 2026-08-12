@@ -275,7 +275,9 @@ class PolicyTests(unittest.TestCase):
             self.assertEqual(updated["steps"]["confirmation"], "pending")
             _, loaded = job_manifest.load_job(path, env)
             self.assertEqual(loaded["steps"]["search"], "complete")
-            self.assertEqual(job_manifest.redacted(loaded)["release"]["magnet"], "<stored>")
+            redacted = job_manifest.redacted(loaded)["release"]
+            self.assertTrue(redacted["magnet_stored"])
+            self.assertEqual(redacted["info_hash"], "a" * 40)
 
     def test_job_manifest_rejects_credentials_and_outside_paths(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -324,7 +326,9 @@ class PolicyTests(unittest.TestCase):
             self.assertEqual(recorded["steps"]["search"], "complete")
             self.assertEqual(recorded["backup_release"]["source"], "The Pirate Bay")
             self.assertEqual(len(recorded["candidate_pool"]), 2)
-            self.assertEqual(job_manifest.redacted(recorded)["backup_release"]["magnet"], "<stored>")
+            redacted = job_manifest.redacted(recorded)["backup_release"]
+            self.assertTrue(redacted["magnet_stored"])
+            self.assertEqual(redacted["info_hash"], "b" * 40)
 
     def test_job_transitions_keep_steps_consistent(self):
         with tempfile.TemporaryDirectory() as raw:

@@ -92,36 +92,33 @@ def language(stream: dict, mapping: dict[int, str]) -> str:
     return LANG_NORMALIZE.get(raw, "und")
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("input", type=Path)
-    parser.add_argument("output", type=Path)
-    parser.add_argument("--probe-json", type=Path, help="saved full probe or Gate 2 JSON")
-    parser.add_argument("--audio-language", action="append", default=[], metavar="INDEX=LANG")
-    parser.add_argument("--subtitle-language", action="append", default=[], metavar="INDEX=LANG")
-    args = parser.parse_args()
-    source = args.input.resolve(strict=True)
-    target = args.output.resolve(strict=False)
-    if not source.is_file():
-        parser.error("input is not a regular file")
+def remux(
+    source: Path, target: Path, info: dict,
+    audio_map: dict[int, str] | None = None,
+    subtitle_map: dict[int, str] | None = None,
+    allow_unknown: bool = False,
+) -> dict:
+    """Stream-copy one already-probed staged file and verify the result."""
+    source = source.resolve(strict=True)
+    target = target.resolve(strict=False)
+    audio_map = dict(audio_map or {})
+    subtitle_map = dict(subtitle_map or {})
+    if not source.is_file() or source.is_symlink():
+        raise ValueError("input is not a regular file")
     if not in_staging(source) or not in_staging(target):
-        parser.error("input and output must remain inside a Movies Nerd staging root")
+        raise ValueError("input and output must remain inside a Movies Nerd staging root")
     if target.suffix.lower() != ".mkv":
-        parser.error("output must use the .mkv extension")
-    if target.exists():
-        parser.error("output already exists; refusing to overwrite")
-
-    audio_map = overrides(args.audio_language)
-    subtitle_map = overrides(args.subtitle_language)
-    info = ffprobe_data(load_report(args.probe_json, source)) if args.probe_json else probe(source)
+        raise ValueError("output must use the .mkv extension")
+    if target.exists() or target.is_symlink():
+        raise ValueError("output already exists; refusing to overwrite")
     streams = info.get("streams", [])
     audio = [stream for stream in streams if stream.get("codec_type") == "audio"]
     subtitles = [stream for stream in streams if stream.get("codec_type") == "subtitle"]
     unknown_audio = [stream["index"] for stream in audio if language(stream, audio_map) == "und"]
     unknown_subs = [stream["index"] for stream in subtitles if language(stream, subtitle_map) == "und"]
-    if unknown_audio or unknown_subs:
-        raise SystemExit(
-            "error: supply explicit language overrides for untagged streams: "
+    if (unknown_audio or unknown_subs) and not allow_unknown:
+        raise ValueError(
+            "supply explicit language overrides for untagged streams: "
             f"audio={unknown_audio}, subtitles={unknown_subs}"
         )
 
@@ -134,7 +131,7 @@ def main() -> int:
     target.parent.mkdir(parents=True, exist_ok=True)
     temp = target.with_name(target.stem + ".remuxing.mkv")
     if temp.exists():
-        raise SystemExit(f"error: temporary output already exists: {temp}")
+        raise ValueError(f"temporary output already exists: {temp}")
     command = [
         "ffmpeg", "-y", "-v", "error", "-i", str(source),
         "-map", "0:v", "-map", "0:a", "-map", "0:s?", "-map", "0:t?",
@@ -183,11 +180,37 @@ def main() -> int:
     except Exception:
         temp.unlink(missing_ok=True)
         raise
-    print(json.dumps({
+    return {
         "input": str(source), "output": str(target), "container": "matroska",
         "reencoded": False, "streams_verified": True,
-        "duration_verified": True, "chapters_verified": True, "source_preserved": True,
-    }, indent=2))
+        "duration_verified": True, "chapters_verified": True,
+        "source_preserved": True,
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("input", type=Path)
+    parser.add_argument("output", type=Path)
+    parser.add_argument("--probe-json", type=Path, help="saved full probe or Gate 2 JSON")
+    parser.add_argument("--audio-language", action="append", default=[], metavar="INDEX=LANG")
+    parser.add_argument("--subtitle-language", action="append", default=[], metavar="INDEX=LANG")
+    args = parser.parse_args()
+    source = args.input.resolve(strict=True)
+    target = args.output.resolve(strict=False)
+    if not source.is_file():
+        parser.error("input is not a regular file")
+    if not in_staging(source) or not in_staging(target):
+        parser.error("input and output must remain inside a Movies Nerd staging root")
+    if target.suffix.lower() != ".mkv":
+        parser.error("output must use the .mkv extension")
+    if target.exists():
+        parser.error("output already exists; refusing to overwrite")
+
+    audio_map = overrides(args.audio_language)
+    subtitle_map = overrides(args.subtitle_language)
+    info = ffprobe_data(load_report(args.probe_json, source)) if args.probe_json else probe(source)
+    print(json.dumps(remux(source, target, info, audio_map, subtitle_map), indent=2))
     return 0
 
 
