@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Privately probe confirmed candidates, start the fastest, and keep one standby."""
+"""Privately compare confirmed candidates, keep the best, and remove duplicates."""
 
 from __future__ import annotations
 
@@ -122,6 +122,23 @@ def remove_quietly(client, info_hash: str) -> None:
         remove_movies_nerd_torrent(client, info_hash)
     except QbtError:
         pass
+
+
+def remove_and_verify(client, info_hash: str) -> None:
+    """Permanently retire one exact owned candidate and prove it is absent."""
+    normalized = normalize_hash(info_hash)
+    try:
+        remove_movies_nerd_torrent(client, normalized)
+    except QbtError as exc:
+        if "not present" not in str(exc):
+            raise
+    try:
+        torrent_info(client, normalized)
+    except QbtError as exc:
+        if "not present" in str(exc):
+            return
+        raise
+    raise QbtError("duplicate candidate remained in qBittorrent after removal")
 
 
 def existing_candidate(client, info_hash: str) -> bool:
@@ -304,13 +321,11 @@ def race(
             continue
 
         winner = live[0]
-        standby = live[1] if len(live) > 1 else None
-        keep = {winner.info_hash}
-        if standby:
-            keep.add(standby.info_hash)
+        removed_hashes = []
         for probe in ready:
-            if probe.info_hash not in keep:
-                remove_quietly(client, probe.info_hash)
+            if probe.info_hash != winner.info_hash:
+                remove_and_verify(client, probe.info_hash)
+                removed_hashes.append(probe.info_hash)
         result = command_start(client, argparse.Namespace(
             hash=winner.info_hash,
             commit=True,
@@ -321,8 +336,14 @@ def race(
         return winner.candidate, {
             **result,
             "winner_hash": winner.info_hash,
-            "standby_hash": standby.info_hash if standby else None,
-            "standby_release": standby.candidate if standby else None,
+            "standby_hash": None,
+            "standby_release": None,
+            "comparison": {
+                "window_seconds": probe_seconds,
+                "healthy_candidates": len(live),
+                "kept_hash": winner.info_hash,
+                "removed_hashes": removed_hashes,
+            },
             "probe": winner.report(),
             "outcomes": outcomes,
             "attempted_hashes": attempted,
@@ -392,6 +413,7 @@ def main() -> int:
                 "standby_hash": result.get("standby_hash"),
                 "tried_hashes": tried,
                 "race_outcomes": result["outcomes"],
+                "last_comparison": result.get("comparison") or {},
                 "last_progress_epoch": time.time(),
             },
             "steps": {"enrichment": "running"},
@@ -400,7 +422,7 @@ def main() -> int:
         print(json.dumps({
             "started": True,
             "winner": {key: winner.get(key) for key in ("title", "source", "provider", "size", "resolution")},
-            "standby_ready": bool(result.get("standby_hash")),
+            "single_transfer": True,
             "transfer": {key: result.get(key) for key in ("hash", "selected_size", "probe", "wave")},
             "job": str(Path(job_path)),
         }, ensure_ascii=False, indent=2))

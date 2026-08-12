@@ -24,7 +24,9 @@ from qbittorrent_api import (
     QbtAccessDenied, QbtError, QbtUnavailable, command_start, connected_client,
     normalize_hash, preflight, remove_movies_nerd_torrent, torrent_info,
 )
-from race_candidates import candidate_hash, pool_from_job, race, remove_quietly
+from race_candidates import (
+    candidate_hash, pool_from_job, race, remove_and_verify, remove_quietly,
+)
 from search_releases import checked_query, release_selection, search_all
 
 
@@ -152,12 +154,71 @@ def start_race(job_path: Path, job: dict, client, excluded: set[str]) -> tuple[s
             "standby_hash": result.get("standby_hash"),
             "tried_hashes": attempted,
             "race_outcomes": result.get("outcomes") or [],
+            "last_comparison": result.get("comparison") or {},
             "last_progress_epoch": time.time(),
         },
         "steps": {"enrichment": "running"},
         "artifacts": {"enrichment_requested_at": time.time()},
     })
     return active_hash, updated
+
+
+def known_candidate_hashes(job: dict) -> set[str]:
+    values = set((job.get("controller") or {}).get("tried_hashes") or [])
+    standby = (job.get("controller") or {}).get("standby_hash")
+    if standby:
+        values.add(str(standby))
+    for release in [*(job.get("candidate_pool") or []), job.get("release"), job.get("backup_release")]:
+        if not isinstance(release, dict):
+            continue
+        try:
+            values.add(candidate_hash(release))
+        except (QbtError, ValueError):
+            pass
+    result = set()
+    for value in values:
+        try:
+            result.add(normalize_hash(str(value)))
+        except QbtError:
+            pass
+    return result
+
+
+def enforce_single_transfer(job_path: Path, job: dict, client, active_hash: str) -> dict:
+    """Keep only the selected candidate, including when resuming a v2.0.0 job."""
+    active = normalize_hash(active_hash)
+    removed = []
+    for info_hash in sorted(known_candidate_hashes(job) - {active}):
+        try:
+            torrent_info(client, info_hash)
+        except QbtError as exc:
+            if "not present" in str(exc):
+                continue
+            raise
+        remove_and_verify(client, info_hash)
+        removed.append(info_hash)
+    controller = job.get("controller") or {}
+    if removed or controller.get("standby_hash") or job.get("backup_release"):
+        return update_job(job_path, {
+            "backup_release": None,
+            "controller": {
+                "standby_hash": None,
+                "single_transfer_checked_epoch": time.time(),
+                "duplicate_hashes_removed": removed,
+            },
+        })
+    return job
+
+
+def replacement_available(job: dict) -> bool:
+    tried = set((job.get("controller") or {}).get("tried_hashes") or [])
+    for release in job.get("candidate_pool") or []:
+        try:
+            if candidate_hash(release) not in tried:
+                return True
+        except (QbtError, ValueError):
+            continue
+    return int((job.get("controller") or {}).get("refreshes", 0) or 0) < 1
 
 
 def activate_standby(job_path: Path, job: dict, client, old_hash: str) -> tuple[str, dict] | None:
@@ -282,6 +343,7 @@ def run(job_path: Path, *, poll_seconds: int, max_seconds: int = 0) -> dict:
                 clean_terminal_failure(checked, latest, client, str(exc))
                 raise TerminalAcquisitionError(str(exc)) from exc
             raise
+        job = enforce_single_transfer(checked, job, client, active_hash)
         if job.get("state") == "downloaded":
             return {"downloaded": True, "job": str(checked), "preflight": readiness}
         print(json.dumps({
@@ -300,7 +362,7 @@ def run(job_path: Path, *, poll_seconds: int, max_seconds: int = 0) -> dict:
             _, job = load_job(checked)
             report = assess_samples(
                 samples, str((job.get("release") or {}).get("source") or "selected source"),
-                standby_ready=bool((job.get("controller") or {}).get("standby_hash")),
+                standby_ready=replacement_available(job),
                 no_progress_seconds=DEFAULT_NO_PROGRESS_SECONDS,
                 low_speed_seconds=DEFAULT_LOW_SPEED_SECONDS,
                 low_speed_bps=DEFAULT_LOW_SPEED_BPS,

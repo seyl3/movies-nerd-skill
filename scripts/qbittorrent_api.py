@@ -642,19 +642,23 @@ def remove_movies_nerd_torrent(client: QbtClient, torrent_hash: str) -> dict:
     transfer = checked_movies_nerd_transfer(info, normalized)
     client.request("torrents/stop", {"hashes": normalized})
     client.request("torrents/delete", {"hashes": normalized, "deleteFiles": "true"})
-    deadline = time.monotonic() + 5
+    deadline = time.monotonic() + 10
+    absent = False
     while time.monotonic() < deadline:
         try:
             torrent_info(client, normalized)
         except QbtError as exc:
             if "not present" in str(exc):
+                absent = True
                 break
             raise
         time.sleep(0.1)
-    try:
-        transfer.rmdir()
-    except (FileNotFoundError, OSError):
-        pass
+    if not absent:
+        raise QbtError("qBittorrent did not remove the exact Movies Nerd candidate promptly")
+    if transfer.exists():
+        if transfer.is_symlink() or not transfer.is_dir():
+            raise QbtError("refusing to clean an unsafe Movies Nerd transfer path")
+        shutil.rmtree(transfer)
     sidecar = transfer.with_name("._" + transfer.name)
     if sidecar.is_file() and not sidecar.is_symlink():
         sidecar.unlink(missing_ok=True)

@@ -289,6 +289,65 @@ class RaceAndMonitorV2Tests(unittest.TestCase):
 
 
 class ControllerAndCleanupTests(unittest.TestCase):
+    def test_resumed_job_removes_every_duplicate_candidate(self):
+        with tempfile.TemporaryDirectory() as raw:
+            env = roots(Path(raw))
+            with patch.dict(os.environ, env, clear=False):
+                path = job_manifest.create_job("movie", "Example", 2024)
+                job_manifest.update_job(path, {
+                    "state": "downloading",
+                    "release": candidate("a" * 40),
+                    "backup_release": candidate("b" * 40, "backup"),
+                    "candidate_pool": [candidate("a" * 40), candidate("b" * 40), candidate("c" * 40)],
+                    "controller": {
+                        "active_hash": "a" * 40,
+                        "standby_hash": "b" * 40,
+                        "tried_hashes": ["a" * 40, "b" * 40, "c" * 40],
+                    },
+                })
+                _, job = job_manifest.load_job(path)
+                present = {"a" * 40, "b" * 40, "c" * 40}
+
+                def info(_client, value):
+                    if value not in present:
+                        raise qbt.QbtError("torrent is not present in qBittorrent")
+                    return {"hash": value}
+
+                def remove(_client, value):
+                    present.discard(value)
+
+                with (
+                    patch.object(acquire, "torrent_info", side_effect=info),
+                    patch.object(acquire, "remove_and_verify", side_effect=remove),
+                ):
+                    updated = acquire.enforce_single_transfer(path, job, object(), "a" * 40)
+            self.assertEqual(present, {"a" * 40})
+            self.assertIsNone(updated["controller"]["standby_hash"])
+            self.assertEqual(updated["controller"]["duplicate_hashes_removed"], ["b" * 40, "c" * 40])
+
+    def test_exact_qbittorrent_removal_deletes_partial_candidate_directory(self):
+        with tempfile.TemporaryDirectory() as raw:
+            env = roots(Path(raw))
+            with patch.dict(os.environ, env, clear=False):
+                info_hash = "d" * 40
+                transfer = _common.stage_for_kind("movie") / "transfers" / info_hash
+                transfer.mkdir(parents=True)
+                (transfer / "partial.mkv").write_bytes(b"partial")
+                info = {
+                    "hash": info_hash,
+                    "save_path": str(transfer),
+                    "tags": "movies-nerd, movie",
+                }
+
+                class Client:
+                    def request(self, *_args, **_kwargs):
+                        return b"Ok."
+
+                with patch.object(qbt, "torrent_info", side_effect=[info, qbt.QbtError("torrent is not present in qBittorrent")]):
+                    result = qbt.remove_movies_nerd_torrent(Client(), info_hash)
+            self.assertTrue(result["staged_payload_removed"])
+            self.assertFalse(transfer.exists())
+
     def test_qbittorrent_preflight_reads_connection_once(self):
         class Client:
             def request(self, endpoint, *_args, **_kwargs):

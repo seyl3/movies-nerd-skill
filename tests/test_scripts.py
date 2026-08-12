@@ -502,13 +502,15 @@ class PolicyTests(unittest.TestCase):
             patch.object(race_candidates, "prepare_wave", return_value=([first, second], [])),
             patch.object(race_candidates, "probe_wave"),
             patch.object(race_candidates, "record_outcome"),
-            patch.object(race_candidates, "remove_movies_nerd_torrent", side_effect=lambda _client, value: removed.append(value)),
+            patch.object(race_candidates, "remove_and_verify", side_effect=lambda _client, value: removed.append(value)),
             patch.object(race_candidates, "command_start", return_value={"started": True, "hash": "b" * 40}),
         ):
             winner, result = race_candidates.race(object(), candidates, "movie", "Example (2024)", 15, 5)
         self.assertEqual(winner["source"], "two")
-        self.assertEqual(removed, [])
-        self.assertEqual(result["standby_hash"], "a" * 40)
+        self.assertEqual(removed, ["a" * 40])
+        self.assertIsNone(result["standby_hash"])
+        self.assertEqual(result["comparison"]["kept_hash"], "b" * 40)
+        self.assertEqual(result["comparison"]["healthy_candidates"], 2)
         self.assertTrue(result["started"])
 
     def test_api_search_deduplicates_by_info_hash(self):
