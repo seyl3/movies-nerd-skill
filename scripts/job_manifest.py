@@ -14,7 +14,7 @@ import stat
 import sys
 import uuid
 
-from _common import state_roots
+from _common import clean_appledouble_tree, remove_appledouble_sibling, state_roots
 from qbittorrent_api import QbtError, magnet_hash, safe_magnet
 from torrent_metadata import TorrentMetadataError, checked_torrent_url
 
@@ -154,8 +154,11 @@ def validate_tree(value: object, depth: int = 0) -> None:
 
 
 def read_json(path: str | Path, max_bytes: int = MAX_MANIFEST_BYTES) -> dict:
-    if str(path) == "-":
+    source_text = str(path)
+    if source_text == "-":
         raw = sys.stdin.buffer.read(max_bytes + 1)
+    elif source_text.lstrip().startswith("{"):
+        raw = source_text.encode("utf-8")
     else:
         source = Path(path)
         if source.is_symlink() or not source.is_file():
@@ -188,12 +191,15 @@ def jobs_root(
     if create:
         state.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(state, 0o700)
+        remove_appledouble_sibling(state)
     root = state / "jobs"
     if root.exists() and root.is_symlink():
         raise ManifestError("jobs directory must not be a symlink")
     if create:
         root.mkdir(mode=0o700, exist_ok=True)
         os.chmod(root, 0o700)
+        remove_appledouble_sibling(root)
+        clean_appledouble_tree(state)
     return root.resolve(strict=create)
 
 
@@ -234,6 +240,7 @@ def atomic_write(path: Path, value: dict, *, exclusive: bool = False) -> None:
             handle.write(raw)
             handle.flush()
             os.fsync(handle.fileno())
+        remove_appledouble_sibling(path)
         return
     temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
@@ -245,8 +252,10 @@ def atomic_write(path: Path, value: dict, *, exclusive: bool = False) -> None:
             os.fsync(handle.fileno())
         os.replace(temp, path)
         os.chmod(path, 0o600)
+        remove_appledouble_sibling(path)
     finally:
         temp.unlink(missing_ok=True)
+        remove_appledouble_sibling(temp)
 
 
 def create_job(
@@ -325,8 +334,19 @@ def merge_patch(current: dict, patch: dict, *, creating: bool = False) -> dict:
 def load_job(path: str | Path, environ: dict[str, str] | None = None) -> tuple[Path, dict]:
     checked = checked_job_path(path, environ)
     value = read_json(checked)
-    if value.get("version") != 2 or not isinstance(value.get("job_id"), str):
+    job_id = value.get("job_id")
+    kind = value.get("kind")
+    if (
+        value.get("version") != 2
+        or not isinstance(job_id, str)
+        or not re.fullmatch(r"[0-9a-f]{32}", job_id)
+        or kind not in {"movie", "series"}
+        or checked.name != f"{job_id}.json"
+    ):
         raise ManifestError("unsupported or invalid job manifest")
+    expected = jobs_root(kind, environ, create=False)
+    if checked.parent != expected.resolve(strict=True):
+        raise ManifestError("job manifest is stored under the wrong media type")
     return checked, value
 
 
@@ -448,8 +468,16 @@ def record_search(
     job: str | Path, search_result: str | Path,
     environ: dict[str, str] | None = None,
 ) -> dict:
-    _, current = load_job(job, environ)
     result = read_json(search_result, 5 * 1024 * 1024)
+    return record_search_value(job, result, environ)
+
+
+def record_search_value(
+    job: str | Path, result: dict,
+    environ: dict[str, str] | None = None,
+) -> dict:
+    checked, current = load_job(job, environ)
+    validate_tree(result)
     request = result.get("request")
     selection = result.get("selection")
     if not isinstance(request, dict) or not isinstance(selection, dict):
@@ -461,6 +489,23 @@ def record_search(
         or request.get("kind") != current["kind"]
     ):
         raise ManifestError("search result identity does not match the job")
+    request_imdb = str(request.get("imdb_id") or "").lower()
+    if request_imdb:
+        if not re.fullmatch(r"tt[0-9]{5,10}", request_imdb):
+            raise ManifestError("search result has an invalid IMDb ID")
+        current_ids = dict((identity.get("ids") or {}))
+        existing = str(current_ids.get("imdb") or current_ids.get("imdb_id") or "").lower()
+        if existing and existing != request_imdb:
+            raise ManifestError("search result IMDb ID does not match the job")
+        if not existing:
+            if current.get("state") != "planned":
+                raise ManifestError("authoritative IDs must be bound before confirmation")
+            current_ids["imdb"] = request_imdb
+            bound = deepcopy(current)
+            bound["identity"]["ids"] = current_ids
+            bound["updated_at"] = now_utc()
+            atomic_write(checked, bound)
+            current = bound
     primary = checked_release(selection.get("primary"))
     raw_backup = selection.get("backup")
     backup = checked_release(raw_backup) if raw_backup is not None else None
@@ -499,16 +544,25 @@ def record_search(
             },
         },
     }
-    return update_job(job, patch, environ)
+    return update_job(checked, patch, environ)
 
 
 def redacted(value: dict) -> dict:
     def visit(item: object) -> object:
         if isinstance(item, dict):
-            return {
-                key: "<stored>" if key.casefold() in {"magnet", "torrent_hash"} and child else visit(child)
-                for key, child in item.items()
-            }
+            output = {}
+            for key, child in item.items():
+                if key.casefold() == "magnet" and child:
+                    output["magnet"] = "<stored safely; audit with info_hash>"
+                    output["magnet_stored"] = True
+                    if not item.get("info_hash"):
+                        try:
+                            output["info_hash"] = magnet_hash(str(child))
+                        except QbtError:
+                            output["info_hash"] = "<invalid>"
+                    continue
+                output[key] = visit(child)
+            return output
         if isinstance(item, list):
             return [visit(child) for child in item]
         return deepcopy(item)
@@ -523,10 +577,19 @@ def main() -> int:
     create.add_argument("--kind", choices=("movie", "series"), required=True)
     create.add_argument("--title", required=True)
     create.add_argument("--year", type=int, required=True)
-    create.add_argument("--input", help="optional JSON object to merge; use - for stdin")
+    create.add_argument("--imdb-id", help="authoritative IMDb ID, for example tt1234567")
+    create.add_argument("--tmdb-id", help="authoritative numeric TMDB ID")
+    create.add_argument("--runtime-min", type=float, help="authoritative runtime in minutes")
+    create.add_argument(
+        "--input",
+        help="optional JSON file, inline JSON object, or - for stdin",
+    )
     update = subparsers.add_parser("update")
     update.add_argument("job")
-    update.add_argument("--input", required=True, help="JSON merge object; use - for stdin")
+    update.add_argument(
+        "--input", required=True,
+        help="JSON file, inline JSON merge object, or - for stdin",
+    )
     record = subparsers.add_parser("record-search")
     record.add_argument("job")
     record.add_argument("search_result")
@@ -544,9 +607,25 @@ def main() -> int:
     args = parser.parse_args()
     try:
         if args.command == "create":
+            initial = read_json(args.input) if args.input else {}
+            ids = dict(((initial.get("identity") or {}).get("ids") or {}))
+            if args.imdb_id:
+                if not re.fullmatch(r"tt[0-9]{5,10}", args.imdb_id):
+                    raise ManifestError("IMDb ID must look like tt1234567")
+                ids["imdb"] = args.imdb_id
+            if args.tmdb_id:
+                if not re.fullmatch(r"[1-9][0-9]{0,11}", args.tmdb_id):
+                    raise ManifestError("TMDB ID must be numeric")
+                ids["tmdb"] = args.tmdb_id
+            if ids:
+                initial.setdefault("identity", {})["ids"] = ids
+            if args.runtime_min is not None:
+                if not 1 <= args.runtime_min <= 1440:
+                    raise ManifestError("runtime must be between 1 and 1440 minutes")
+                initial.setdefault("cache", {})["runtime_minutes"] = args.runtime_min
             path = create_job(
                 args.kind, args.title, args.year,
-                read_json(args.input) if args.input else None,
+                initial or None,
             )
             _, value = load_job(path)
             print(json.dumps({"job": str(path), "manifest": redacted(value)}, ensure_ascii=False, indent=2))

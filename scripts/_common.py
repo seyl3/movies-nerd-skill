@@ -123,3 +123,43 @@ def first_value(mapping: dict, names: tuple[str, ...], default=None):
         if value is not None and value != "":
             return value
     return default
+
+
+def remove_appledouble_sibling(path: Path) -> bool:
+    """Remove the exact AppleDouble companion macOS may create for *path*."""
+    sidecar = path.with_name("._" + path.name)
+    if not sidecar.exists():
+        return False
+    if sidecar.is_symlink() or not sidecar.is_file():
+        raise ValueError(f"unsafe AppleDouble companion: {sidecar}")
+    sidecar.unlink()
+    return True
+
+
+def clean_appledouble_tree(root: Path) -> list[str]:
+    """Remove only regular ``._*`` files below one already-scoped root."""
+    if not root.exists():
+        return []
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError(f"AppleDouble cleanup root is unsafe: {root}")
+    removed: list[str] = []
+    for current, directories, files in os.walk(root, topdown=True, followlinks=False):
+        current_path = Path(current)
+        safe_directories = []
+        for name in directories:
+            candidate = current_path / name
+            if candidate.is_symlink():
+                continue
+            if name.startswith("._"):
+                raise ValueError(f"unsafe AppleDouble directory: {candidate}")
+            safe_directories.append(name)
+        directories[:] = safe_directories
+        for name in files:
+            if not name.startswith("._"):
+                continue
+            candidate = current_path / name
+            if candidate.is_symlink() or not candidate.is_file():
+                raise ValueError(f"unsafe AppleDouble companion: {candidate}")
+            candidate.unlink()
+            removed.append(str(candidate))
+    return removed
