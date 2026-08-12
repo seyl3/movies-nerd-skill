@@ -47,7 +47,7 @@ def probe(url: str, timeout: float) -> dict:
     request = urllib.request.Request(
         url,
         headers={
-            "User-Agent": "Movies-Nerd/1.0 (+read-only availability probe)",
+            "User-Agent": "Movies-Nerd/2.0 (+read-only availability probe)",
             "Accept": "text/html,application/xhtml+xml",
             "Range": f"bytes=0-{MAX_BODY - 1}",
         },

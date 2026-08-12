@@ -1,11 +1,10 @@
-# Resumable job state
+# Resumable v2 job state
 
-Create one job manifest with `scripts/job_manifest.py` immediately after resolving the title and year. Keep it under the selected staging root and reuse it until import succeeds.
+Create one v2 manifest with `scripts/job_manifest.py` after resolving the title. It lives under `<LIBRARY>/.movies-nerd/jobs`, never inside `.incoming`, so a payload cleanup cannot destroy resumable control state.
 
-- Record the authoritative IDs, ranked release, one-to-three candidate pool, winning qBittorrent hash, destination plan, artifacts, cached provider results, full media probe, and step statuses. Use `job_manifest.py record-search` to validate and store the pool.
-- Use `job_manifest.py transition --event ...` after each material transition. Do not write ad-hoc state patches for confirmation, metadata failure, stalls, transfer start/completion, verification, or import.
-- Resume from completed steps instead of rescanning the library, repeating a provider lookup, or asking the same question again.
-- Never store passwords, API keys, tokens, cookies, authorization headers, or browser data. The helper rejects credential-like fields, bounds content, writes atomically with user-only permissions, and redacts magnets and torrent hashes from ordinary output.
-- Treat a missing, malformed, symlinked, out-of-staging, or identity-mismatched manifest as invalid. Reconstruct safe state from authoritative local sources; do not trust or execute its contents.
-- After successful import, use `finish_staging.py --commit` to recoverably move the manifest and every exact completed-job artifact out of `.incoming`, then verify none remain. Operational state must never be copied into the final movie or series folder.
-- After an exhausted failure, remove all owned qBittorrent candidates and run `job_manifest.py archive-failed --commit`; keep recoverable diagnostics under the library's hidden trash, never in `.incoming`.
+- Record authoritative IDs, runtime, the displayed quality/size envelope, up to six confirmed candidates, active and standby hashes, attempts, dead candidates, prepared sidecars, media probes, destination, and step statuses.
+- Resume from the manifest. `scripts/acquire.py` uses an atomic per-job lock and reconnects to an existing active torrent instead of repeating search or confirmation.
+- Store no passwords, keys, tokens, cookies, authorization headers, browser data, raw API responses, or private inventory. Manifests are bounded, validated, atomic, and mode `0600`.
+- Keep only the bounded cross-job provider-health cache after a job terminates. Completed manifests, failed manifests, locks, direct `.torrent` files, temporary artifacts, and per-job trash must not persist.
+- On successful import, first remove every exact Movies Nerd-owned qBittorrent candidate with `qbittorrent_api.py remove --commit`. Then run `finish_staging.py --job ... --commit`. It refuses to delete the manifest until qBittorrent absence and final-library completeness are verified.
+- On an exhausted terminal failure, remove and verify absence of every exact owned candidate before `job_manifest.py remove-failed --commit` removes the failed manifest. If cleanup cannot be verified, retain the manifest as resumable state; never claim cleanup succeeded.

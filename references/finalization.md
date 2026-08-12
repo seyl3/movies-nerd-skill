@@ -1,33 +1,22 @@
 # Fast finalization
 
-Use the download window to prepare every independent sidecar so completion is mostly a safe, atomic import.
+Start independent sidecar work as soon as `acquire.py` emits `enrichment: start-now`. Run `finalization_queue.py start-all` and perform these tasks concurrently while the video downloads:
 
-## While the transfer runs
+- Canonical destination plan and authoritative IDs
+- NFO metadata
+- Exact poster, fanart, and clear logo when available
+- English and French subtitle lookup and staged validation
+- For movies, verified direct Letterboxd/SensCritique links and two recommendations
 
-Start these jobs concurrently after Gate 1 succeeds:
+Keep prepared artifacts under the matching `.incoming/Movies Nerd` job directory. Mark each task with `finalization_queue.py mark`; never install beside incomplete media. Do not probe incomplete video or write provisional stream data into final NFO files.
 
-- Resolve the canonical destination names and authoritative IDs.
-- Fetch the exact movie or series metadata, poster, fanart, and clear logo when available.
-- Search for English and French subtitles using the confirmed release name. Download only into staging and validate there; never write beside an incomplete video.
-- Verify the completed movie's direct Letterboxd and SensCritique pages. Resolve the two post-download recommendations and verify their direct pages too.
+## After completion
 
-Keep every prepared artifact in the matching hidden staging root. Do not inspect incomplete media, generate final NFO runtime or stream fields from provisional tracker data, or move anything into the library before Gate 2 passes.
+1. Transition to finalizing and stop the winner.
+2. Run Gate 2 once with `select_payload.py`. If separate junk exists, clean-extract and re-verify only selected media. A bad NFO, image, subtitle, executable, archive, or macOS sidecar must not reject a verified video.
+3. Reuse the saved probe for subtitles, track labels, chapters, and remux decisions. Keep a compliant MKV unchanged; use `edit_mkv_headers.py` for safe header-only fixes; otherwise perform one verified stream-copy remux. Never re-encode only for naming or container preference.
+4. Validate prepared SRT, image, and XML files, then atomically install media and trusted sidecars.
+5. Verify the final folder has media, NFO, and artwork. Remove every exact Movies Nerd-owned active, standby, loser, and failed qBittorrent entry with its bundled exact-hash command.
+6. Run `finish_staging.py --job <manifest> --staged <exact-job-path> --commit`. Completion requires no matching job manifest, lock, temporary `.torrent`, per-job trash, AppleDouble sidecar, transfer, clean directory, or `.incoming/Movies Nerd` residue. The provider-health cache is the only allowed job-independent persistent state.
 
-## After the transfer completes
-
-1. Stop the torrent and run Gate 2 once. It creates a bounded full `media_probe` for every selected movie or episode. If separate release junk exists, clean-extract only the selected media into a fresh job directory and verify it again; do not fail a good video because an NFO or macOS sidecar is bad. Save the clean probe in the job manifest and reuse its path, duration, dimensions, codecs, streams, chapters, and companion inventory.
-2. Pass the saved Gate 2 JSON or probe to `check_subtitles.py`, `validate_subtitle.py`, and `remux_mkv.py` with `--probe-json`. Each consumer verifies the file snapshot and rejects stale data instead of silently probing again.
-3. If the source is already MKV and its language tags, clean track titles, default/forced dispositions, streams, and chapters comply with the library policy, keep it unchanged. Do not rewrite a multi-gigabyte file merely to produce an identical MKV.
-4. If only MKV track headers need correction, run `edit_mkv_headers.py` first. It may use optional `mkvpropedit` only when a copy-on-write rollback clone can be created, then it re-probes and verifies the edited file. If the tool or rollback clone is unavailable, fall back without modifying the source.
-5. If the container must change or the header-only path is unavailable, use one verified `ffmpeg -c copy` remux. Never re-encode solely for naming or container preference.
-6. Validate the already-prepared subtitles, images, and XML, then atomically install the clean media and trusted sidecars. Do not fetch the same metadata or artwork twice.
-7. Verify the final folder has media, NFO, and artwork. Then run `finish_staging.py --commit` for the exact transfer directory, clean directory, job manifest, and partial-data path so no finalized job remains in `.incoming`; cleanup is recoverable from hidden library trash.
-
-Do not rescan the entire library during finalization. Persist exact-title metadata, artwork URLs, subtitle candidates, probes, and recommendation lookups in the staging job manifest. Invalidate a cached result only when the confirmed release, authoritative ID, or destination changes.
-
-## Time budget and user experience
-
-- For a compliant MKV with sidecars prepared during download, target under one minute from transfer completion to a ready library entry.
-- Run independent network work concurrently with bounded timeouts. Begin film-link verification during the transfer. If one cannot be verified by completion, mark that link unavailable rather than holding the media import open.
-- Safety gates, exact-title matching, subtitle validation, and atomic installation are never skipped to meet a time target.
-- A successful transfer start is not a completion message. Keep the task active through finalization, then report one short watch-ready handoff. Mention an optional artifact only when it remains unavailable; do not expose background job or cache details.
+Target less than one minute from transfer completion to a compliant library entry. If an optional film link is unavailable after bounded verification, mark that link unavailable rather than delaying import. Never send the ready message until cleanup passes.

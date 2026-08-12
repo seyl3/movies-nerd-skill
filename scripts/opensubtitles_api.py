@@ -19,7 +19,7 @@ from validate_subtitle import MAX_BYTES, media_duration, validate_bytes
 
 API_BASE = "https://api.opensubtitles.com/api/v1"
 MAX_JSON = 5 * 1024 * 1024
-USER_AGENT = "MoviesNerdSkill v1.0"
+USER_AGENT = "MoviesNerdSkill v2.0"
 CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 

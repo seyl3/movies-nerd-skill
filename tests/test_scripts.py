@@ -344,7 +344,7 @@ class PolicyTests(unittest.TestCase):
             self.assertEqual(failed["state"], "failed")
             self.assertEqual(failed["steps"]["transfer"], "skipped")
 
-    def test_failed_job_is_archived_outside_incoming(self):
+    def test_terminal_failed_job_state_is_removed(self):
         with tempfile.TemporaryDirectory() as raw:
             base = Path(raw)
             env = {
@@ -353,10 +353,10 @@ class PolicyTests(unittest.TestCase):
             }
             job = job_manifest.create_job("movie", "Example", 2024, environ=env)
             job_manifest.transition_job(job, "failed", reason="test", environ=env)
-            result = job_manifest.archive_failed_job(job, environ=env)
+            result = job_manifest.remove_failed_job(job, environ=env)
             self.assertFalse(job.exists())
-            self.assertNotIn("/.incoming/", result["to"])
-            self.assertTrue(Path(result["to"]).is_file())
+            self.assertTrue(result["removed"])
+            self.assertTrue(result["state_clean"])
 
     def test_rank_prefers_eligible_4k_then_1080p(self):
         candidates = [
@@ -399,7 +399,7 @@ class PolicyTests(unittest.TestCase):
         self.assertNotIn("ws=", result["magnet"])
         self.assertEqual(search_releases.magnet_hash(result["magnet"]), "a" * 40)
 
-    def test_apibay_results_are_normalized_without_extra_trackers(self):
+    def test_apibay_results_receive_only_fixed_trackers(self):
         payload = [{
             "name": "Example 2024 2160p HEVC",
             "size": "12000000000",
@@ -410,7 +410,8 @@ class PolicyTests(unittest.TestCase):
         result = search_releases.normalize_apibay(payload)[0]
         self.assertEqual(result["provider"], "APIBay")
         self.assertEqual(result["seeders"], 25)
-        self.assertNotIn("&tr=", result["magnet"])
+        self.assertIn("&tr=", result["magnet"])
+        self.assertNotIn("file%3A", result["magnet"])
 
     def test_yts_and_magnetz_api_results_are_normalized(self):
         yts = search_releases.normalize_yts({
@@ -486,22 +487,28 @@ class PolicyTests(unittest.TestCase):
             },
         ]
 
-        class Client:
-            def request(self, *_args, **_kwargs):
-                return b"Ok."
-
+        first = race_candidates.Probe(candidates[0], "a" * 40, 1.0, "magnet")
+        first.bytes_delta = 1_000_000
+        first.speeds = [100_000, 120_000]
+        first.availability = 1.0
+        first.peers = 2
+        second = race_candidates.Probe(candidates[1], "b" * 40, 0.5, "torrent")
+        second.bytes_delta = 8_000_000
+        second.speeds = [800_000, 900_000]
+        second.availability = 2.0
+        second.peers = 8
         removed = []
         with (
-            patch.object(race_candidates, "command_add"),
-            patch.object(race_candidates, "torrent_files", return_value=[{"name": "Example.mkv"}]),
-            patch.object(race_candidates, "validate_torrent", return_value=({"state": "metaDL"}, {})),
-            patch.object(race_candidates, "health_key", side_effect=lambda _client, item: (item["score"],)),
+            patch.object(race_candidates, "prepare_wave", return_value=([first, second], [])),
+            patch.object(race_candidates, "probe_wave"),
+            patch.object(race_candidates, "record_outcome"),
             patch.object(race_candidates, "remove_movies_nerd_torrent", side_effect=lambda _client, value: removed.append(value)),
             patch.object(race_candidates, "command_start", return_value={"started": True, "hash": "b" * 40}),
         ):
-            winner, result = race_candidates.race(Client(), candidates, "movie", "Example (2024)", 15, 0)
+            winner, result = race_candidates.race(object(), candidates, "movie", "Example (2024)", 15, 5)
         self.assertEqual(winner["source"], "two")
-        self.assertEqual(removed, ["a" * 40])
+        self.assertEqual(removed, [])
+        self.assertEqual(result["standby_hash"], "a" * 40)
         self.assertTrue(result["started"])
 
     def test_api_search_deduplicates_by_info_hash(self):
@@ -669,7 +676,7 @@ class PolicyTests(unittest.TestCase):
         report = json.loads(output.getvalue())
         self.assertEqual(result, monitor_download.CONTINUE_MONITORING)
         self.assertEqual(report["monitoring"], "continue")
-        self.assertIn("do not end", report["next"])
+        self.assertIn("continue", report["next"])
 
     def test_monitor_merges_incremental_qbittorrent_updates(self):
         class Client:
@@ -710,25 +717,25 @@ class PolicyTests(unittest.TestCase):
     def test_monitor_uses_fast_polling_when_transfer_is_inactive(self):
         self.assertEqual(
             monitor_download.next_poll_interval({"download_speed": 0, "state": "stalledDL"}, 60),
-            15,
+            2,
         )
         self.assertEqual(
             monitor_download.next_poll_interval({"download_speed": 1, "state": "downloading"}, 60),
             60,
         )
 
-    def test_monitor_surfaces_prepared_backup_without_magnet(self):
-        candidate = monitor_download.backup_candidate({
-            "backup_release": {
-                "title": "Example 2024 1080p x265",
-                "source": "The Pirate Bay",
-                "size": "2.20 GiB",
-                "seeders": 25,
-                "magnet": "magnet:?xt=urn:btih:" + "a" * 40,
-            },
-        }, "1337x")
-        self.assertEqual(candidate["source"], "The Pirate Bay")
-        self.assertNotIn("magnet", candidate)
+    def test_monitor_uses_prepared_standby_for_slow_transfer(self):
+        samples = [
+            monitor_download.Sample(0, 0, 100_000, 0.1, "downloading", 1, 1.0),
+            monitor_download.Sample(90, 1_000_000, 100_000, 0.11, "downloading", 1, 1.0),
+        ]
+        report = monitor_download.assess_samples(
+            samples, "source", standby_ready=True,
+            no_progress_seconds=60, low_speed_seconds=90,
+            low_speed_bps=200_000,
+        )
+        self.assertTrue(report["stalled"])
+        self.assertTrue(report["failover"]["standby_ready"])
 
     def test_clutter_finder_detects_portuguese_and_apple_files(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -739,7 +746,32 @@ class PolicyTests(unittest.TestCase):
             names = [path.name for path in clean_clutter.targets(root)]
             self.assertEqual(names, [".DS_Store", "Film.pt.srt"])
 
-    def test_finished_job_leaves_incoming_recoverably(self):
+    def test_clutter_cleanup_leaves_no_hidden_trash_copy(self):
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            movies = base / "Films"
+            series = base / "Series"
+            movies.mkdir()
+            series.mkdir()
+            clutter = movies / ".DS_Store"
+            clutter.write_bytes(b"x")
+            argv = ["clean_clutter.py", str(movies), "--commit"]
+            output = io.StringIO()
+            with (
+                patch.dict(os.environ, {
+                    _common.MOVIES_ROOT_ENV: str(movies),
+                    _common.SERIES_ROOT_ENV: str(series),
+                }, clear=False),
+                patch.object(sys, "argv", argv),
+                redirect_stdout(output),
+            ):
+                self.assertEqual(clean_clutter.main(), 0)
+            report = json.loads(output.getvalue())
+            self.assertFalse(clutter.exists())
+            self.assertEqual(report["removed"], [str(clutter.resolve(strict=False))])
+            self.assertFalse((movies / ".movies-nerd-trash").exists())
+
+    def test_finished_job_leaves_no_incoming_or_job_trash(self):
         with tempfile.TemporaryDirectory() as raw:
             base = Path(raw)
             movies = base / "Movies"
@@ -755,22 +787,21 @@ class PolicyTests(unittest.TestCase):
             (final / "Example (2024) [1080p].mkv").write_bytes(b"video")
             (final / "Example (2024) [1080p].nfo").write_text("<movie/>", encoding="utf-8")
             (final / "Example (2024).png").write_bytes(b"image")
-            with (
-                patch.object(finish_staging, "library_roots", return_value=(movies, series)),
-                patch.object(
-                    finish_staging, "staging_roots",
-                    return_value=(stage, series / ".incoming" / "Movies Nerd"),
-                ),
-            ):
-                library, fixed_stage = finish_staging.library_for(final)
-                checked = finish_staging.checked_targets([source], fixed_stage)
-                quarantine, moved = finish_staging.quarantine_targets(checked, fixed_stage, library)
+            env = {
+                _common.MOVIES_ROOT_ENV: str(movies),
+                _common.SERIES_ROOT_ENV: str(series),
+            }
+            with patch.dict(os.environ, env, clear=False):
+                job = job_manifest.create_job("movie", "Example", 2024)
+                job_manifest.update_job(job, {"state": "imported"})
+                with patch.object(finish_staging, "verify_recorded_torrents_absent", return_value={"checked": 0, "all_absent": True}):
+                    result = finish_staging.clean_completed_job(final, [source], job)
             self.assertFalse(source.exists())
             self.assertFalse(sidecar.exists())
-            self.assertEqual(len(moved), 2)
-            self.assertTrue(quarantine.is_dir())
-            self.assertTrue((quarantine / "transfers" / ("a" * 40) / "junk.nfo").is_file())
-            self.assertTrue(Path(moved[0]["from"]).name.startswith("._"))
+            self.assertFalse(job.exists())
+            self.assertTrue(result["clean"])
+            self.assertFalse((movies / ".movies-nerd" / "trash").exists())
+            self.assertFalse(stage.exists())
 
     def test_finished_job_verification_ignores_macos_sidecars(self):
         with tempfile.TemporaryDirectory() as raw:

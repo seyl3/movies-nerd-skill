@@ -6,7 +6,7 @@
 2. Otherwise prefer the best healthy, space-efficient 1080p release.
 3. Prefer HEVC/x265 or AV1 for space-efficient 4K; accept AVC/x264 for 1080p.
 4. Prefer the original-language audio, then lossless or 5.1 audio when size remains reasonable.
-5. Prefer at least 10 seeders and strongly prefer more than 20. Penalize ambiguous titles, missing years, password-protected archives, samples, and release spam.
+5. Use reported seed counts as discovery hints only. Prefer releases that have historically produced live swarms, then let the bounded qBittorrent probe measure actual health. Penalize ambiguous titles, missing years, password-protected archives, samples, and release spam.
 6. Prefer a single main-feature payload. The user rarely wants extras; skip featurettes, trailers, interviews, deleted scenes, samples, and bonus discs unless explicitly requested.
 7. Prefer MKV as the final media container. It is acceptable to download MP4, MOV, AVI, or another supported source container and remux it to MKV with `ffmpeg -c copy` after verification. Do not re-encode solely to obtain MKV.
 
@@ -95,6 +95,6 @@ Root: `<SERIES_ROOT>`
 
 ## Validation and cleanliness
 
-- Recoverably quarantine `.DS_Store`, AppleDouble `._*`, release URLs, advertisements, unrelated installer shortcuts, and Portuguese sidecar subtitles after verifying the payload. Do not remove Portuguese audio tracks.
+- Remove `.DS_Store`, AppleDouble `._*`, release URLs, advertisements, unrelated installer shortcuts, and Portuguese sidecar subtitles from completed Movies Nerd jobs after verifying the payload. Do not remove Portuguese audio tracks. Do not keep per-job quarantine after a successful or terminal cleanup.
 - Preserve featurettes under `Featurettes/` and exclude them from main-feature naming rules.
 - Validate all NFO files as XML and all images as decodable images before reporting completion.
