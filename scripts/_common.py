@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
 import re
 
@@ -11,6 +12,13 @@ GIB = 1024 ** 3
 SIZE_RE = re.compile(r"^\s*([0-9]+(?:\.[0-9]+)?)\s*([kmgt]?i?b)?\s*$", re.I)
 MOVIES_ROOT_ENV = "MOVIES_NERD_MOVIES_ROOT"
 SERIES_ROOT_ENV = "MOVIES_NERD_SERIES_ROOT"
+
+
+def emit_event(event: str, **details: object) -> None:
+    """Write one compact lifecycle event and omit empty implementation detail."""
+    payload = {"event": event}
+    payload.update({key: value for key, value in details.items() if value is not None})
+    print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), flush=True)
 
 
 def _checked_library_root(raw: str, label: str) -> Path:

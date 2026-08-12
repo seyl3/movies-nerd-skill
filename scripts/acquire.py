@@ -12,9 +12,7 @@ from pathlib import Path
 import sys
 import time
 
-from _common import (
-    GIB, clean_appledouble_tree, remove_appledouble_sibling, stage_for_kind,
-)
+from _common import GIB, emit_event, remove_appledouble_sibling
 from finalization_queue import start_all as request_finalization
 from job_manifest import (
     ManifestError, load_job, remove_failed_job, transition_job, update_job,
@@ -375,16 +373,13 @@ def run(
         if job.get("state") == "downloaded":
             return {"downloaded": True, "job": str(checked), "preflight": readiness}
         request_finalization(checked)
-        print(json.dumps({
-            "event": "downloading",
-            "job": str(checked),
-            "enrichment": "start-now",
-        }), flush=True)
+        identity = job["identity"]
+        label = f"{identity['title']} ({identity['year']})"
+        emit_event("download-started", title=label)
         deadline = time.monotonic() + max_seconds if max_seconds else None
         rid = 0
         current = None
         samples = []
-        heartbeat_epoch = 0.0
         prior_downloaded = -1
         while True:
             rid, current = sync_torrent(client, active_hash, rid, current)
@@ -397,17 +392,6 @@ def run(
                 update_job(checked, {
                     "controller": {"last_progress_epoch": now},
                 })
-            if now - heartbeat_epoch >= 30:
-                heartbeat_epoch = now
-                print(json.dumps({
-                    "event": "progress",
-                    "job": str(checked),
-                    "progress": round(samples[-1].progress, 4),
-                    "downloaded": samples[-1].downloaded,
-                    "speed": samples[-1].speed,
-                }), flush=True)
-                clean_appledouble_tree(checked.parent.parent)
-                clean_appledouble_tree(stage_for_kind(str(job["kind"])))
             report = assess_samples(
                 samples, str((job.get("release") or {}).get("source") or "selected source"),
                 standby_ready=replacement_available(job),
@@ -421,6 +405,7 @@ def run(
                     "controller": {"phase": "downloaded", "last_progress_epoch": time.time()},
                 })
                 client.request("torrents/stop", {"hashes": active_hash})
+                emit_event("download-completed", title=label)
                 return {
                     "downloaded": True,
                     "job": str(checked),
@@ -429,6 +414,7 @@ def run(
                     "next": "finalize, import, and run strict cleanup before reporting ready",
                 }
             if report["stalled"]:
+                emit_event("download-stalled", title=label)
                 transition_job(
                     checked, "stalled", reason="; ".join(report["reasons"]),
                     torrent_hash=active_hash,
@@ -446,6 +432,7 @@ def run(
                         clean_terminal_failure(checked, latest, client, str(exc))
                         raise TerminalAcquisitionError(str(exc)) from exc
                     raise
+                emit_event("source-replaced", title=label)
                 rid = 0
                 current = None
                 samples = []

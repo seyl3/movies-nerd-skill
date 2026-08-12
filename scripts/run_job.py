@@ -9,6 +9,7 @@ from pathlib import Path
 import sys
 import time
 
+from _common import emit_event
 import acquire
 from acquire import ControllerError, JobLock, TerminalAcquisitionError, bounded_integer
 from finalization_queue import required_tasks, start_all, task_state
@@ -35,24 +36,15 @@ def run(
         _, job = load_job(checked)
         if not job.get("enrichment_tasks"):
             start_all(checked)
+        identity = job["identity"]
+        label = f"{identity['title']} ({identity['year']})"
+        emit_event("finalization-started", title=label)
         deadline = time.monotonic() + artifact_wait_seconds
-        last_heartbeat = 0.0
         while True:
             _, job = load_job(checked)
             if ready_for_finalization(job):
                 break
             now = time.monotonic()
-            if now - last_heartbeat >= 30:
-                last_heartbeat = now
-                pending = [
-                    name for name, item in task_state(job).items()
-                    if item.get("status") != "complete"
-                ]
-                print(json.dumps({
-                    "event": "preparing-library-entry",
-                    "job": str(checked),
-                    "remaining": pending,
-                }), flush=True)
             if now >= deadline:
                 return {
                     "ready": False,
@@ -62,7 +54,24 @@ def run(
                     "next": "finish the already-requested preparation and resume this same job",
                 }
             time.sleep(min(2, max(0.1, deadline - now)))
-        return finalize(checked) if job.get("kind") == "movie" else finalize_series(checked)
+        result = finalize(checked) if job.get("kind") == "movie" else finalize_series(checked)
+        if result.get("ready"):
+            ready_details = {
+                key: result[key]
+                for key in (
+                    "destination",
+                    "quality",
+                    "letterboxd",
+                    "senscritique",
+                    "recommendations",
+                    "episodes",
+                    "seasons",
+                )
+                if result.get(key) is not None
+            }
+            emit_event("ready", title=label, **ready_details)
+            result = {"event": "ready", **result}
+        return result
 
 
 def main() -> int:
@@ -86,7 +95,8 @@ def main() -> int:
             args.job, poll_seconds=args.poll_seconds,
             artifact_wait_seconds=args.artifact_wait_seconds,
         )
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        if not result.get("ready"):
+            print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result.get("ready") else 8
     except QbtAccessDenied as exc:
         print(json.dumps({
