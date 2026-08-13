@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 import stat
 import sys
+import threading
 import uuid
 
 from _common import clean_appledouble_tree, remove_appledouble_sibling, state_roots
@@ -25,6 +26,15 @@ SENSITIVE_KEY_RE = re.compile(
     r"(?:password|passwd|secret|token|api[_-]?key|cookie|authorization|credential)", re.I,
 )
 CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_UPDATE_LOCKS: dict[str, threading.RLock] = {}
+_UPDATE_LOCKS_GUARD = threading.Lock()
+
+
+def job_update_lock(path: str | Path) -> threading.RLock:
+    """Return the in-process lock protecting one manifest's read-modify-write cycle."""
+    key = str(Path(path).expanduser().resolve(strict=False))
+    with _UPDATE_LOCKS_GUARD:
+        return _UPDATE_LOCKS.setdefault(key, threading.RLock())
 STATES = {"planned", "confirmed", "downloading", "stalled", "downloaded", "finalizing", "verified", "imported", "failed"}
 STEP_STATES = {"pending", "running", "complete", "skipped", "failed"}
 IMMUTABLE_KEYS = {"version", "job_id", "created_at", "kind", "identity"}
@@ -353,10 +363,11 @@ def load_job(path: str | Path, environ: dict[str, str] | None = None) -> tuple[P
 def update_job(
     path: str | Path, patch: dict, environ: dict[str, str] | None = None,
 ) -> dict:
-    checked, current = load_job(path, environ)
-    updated = merge_patch(current, patch)
-    atomic_write(checked, updated)
-    return updated
+    with job_update_lock(path):
+        checked, current = load_job(path, environ)
+        updated = merge_patch(current, patch)
+        atomic_write(checked, updated)
+        return updated
 
 
 def transition_job(
@@ -365,35 +376,36 @@ def transition_job(
     environ: dict[str, str] | None = None,
 ) -> dict:
     """Apply one consistent workflow transition instead of ad-hoc state patches."""
-    _, current = load_job(path, environ)
-    if event not in EVENT_PATCHES:
-        raise ManifestError(f"unknown job event: {event}")
-    if current.get("state") not in EVENT_FROM_STATES[event]:
-        raise ManifestError(
-            f"cannot apply {event} while job state is {current.get('state')}"
-        )
-    patch = deepcopy(EVENT_PATCHES[event])
-    artifacts = {}
-    if reason:
-        artifacts["failure_reason"] = reason.strip()[:1000]
-    if torrent_hash:
-        try:
-            artifacts["torrent_hash"] = magnet_hash(
-                f"magnet:?xt=urn:btih:{torrent_hash}"
+    with job_update_lock(path):
+        _, current = load_job(path, environ)
+        if event not in EVENT_PATCHES:
+            raise ManifestError(f"unknown job event: {event}")
+        if current.get("state") not in EVENT_FROM_STATES[event]:
+            raise ManifestError(
+                f"cannot apply {event} while job state is {current.get('state')}"
             )
-        except QbtError as exc:
-            raise ManifestError("transition has an invalid torrent hash") from exc
-    if artifacts:
-        patch["artifacts"] = artifacts
-    if release is not None:
-        patch["release"] = checked_release(release)
-    if event == "failed":
-        steps = deepcopy(current.get("steps") or {})
-        for name, status in steps.items():
-            if status == "running":
-                steps[name] = "failed"
-        patch["steps"] = steps
-    return update_job(path, patch, environ)
+        patch = deepcopy(EVENT_PATCHES[event])
+        artifacts = {}
+        if reason:
+            artifacts["failure_reason"] = reason.strip()[:1000]
+        if torrent_hash:
+            try:
+                artifacts["torrent_hash"] = magnet_hash(
+                    f"magnet:?xt=urn:btih:{torrent_hash}"
+                )
+            except QbtError as exc:
+                raise ManifestError("transition has an invalid torrent hash") from exc
+        if artifacts:
+            patch["artifacts"] = artifacts
+        if release is not None:
+            patch["release"] = checked_release(release)
+        if event == "failed":
+            steps = deepcopy(current.get("steps") or {})
+            for name, status in steps.items():
+                if status == "running":
+                    steps[name] = "failed"
+            patch["steps"] = steps
+        return update_job(path, patch, environ)
 
 
 def remove_failed_job(

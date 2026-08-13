@@ -24,6 +24,7 @@ sys.path.insert(0, str(SCRIPTS))
 import _common
 import acquire
 import batch_jobs
+import cinemeta
 import finalization_queue
 import finalize_job
 import finalize_series
@@ -33,6 +34,7 @@ import media_probe
 import monitor_download
 import provider_health
 import prepare_job
+import prepare_artifacts
 import run_job
 import qbittorrent_api as qbt
 import race_candidates
@@ -225,6 +227,29 @@ class HealthAndStateTests(unittest.TestCase):
             self.assertEqual(job["identity"]["ids"]["imdb"], "tt1234567")
             self.assertEqual(len(job["candidate_pool"]), 2)
             self.assertFalse(any(job_path.parent.glob("*search*.json")))
+
+    def test_prepare_job_resolves_missing_imdb_id_automatically(self):
+        with tempfile.TemporaryDirectory() as raw:
+            env = roots(Path(raw))
+            items = [candidate("a" * 40)]
+            with (
+                patch.dict(os.environ, env, clear=False),
+                patch.object(prepare_job, "dead_hashes", return_value=set()),
+                patch.object(
+                    prepare_job, "search_all",
+                    return_value=(items, {"apibay": {"ok": True, "results": 1, "latency_ms": 25}}, True),
+                ),
+                patch.object(prepare_job, "record_provider"),
+                patch.object(cinemeta, "resolve_imdb", return_value="tt7654321") as resolve,
+            ):
+                result = prepare_job.prepare(
+                    title="Example", year=2024, kind="movie",
+                    runtime_minutes=100, imdb_id=None,
+                    max_gib=15, timeout=5,
+                )
+                _, job = job_manifest.load_job(result["job"])
+            resolve.assert_called_once_with("movie", "Example", 2024)
+            self.assertEqual(job["identity"]["ids"]["imdb"], "tt7654321")
 
     def test_inline_json_and_authoritative_ids_are_supported(self):
         value = job_manifest.read_json('{"cache":{"runtime_minutes":121}}')
@@ -512,6 +537,10 @@ class ControllerAndCleanupTests(unittest.TestCase):
                 output = io.StringIO()
                 with (
                     patch.object(acquire, "run", return_value={"downloaded": True}),
+                    patch.object(
+                        prepare_artifacts, "prepare_when_started",
+                        return_value={"ready": True, "automated": True},
+                    ) as artifacts,
                     patch.object(run_job, "finalize", return_value={"ready": True}) as finish,
                     redirect_stdout(output),
                 ):
@@ -520,6 +549,7 @@ class ControllerAndCleanupTests(unittest.TestCase):
                 lock = path.parent.parent / "locks" / f"{job['job_id']}.lock"
             self.assertTrue(result["ready"])
             self.assertFalse(lock.exists())
+            artifacts.assert_called_once()
             finish.assert_called_once()
             events = [json.loads(line)["event"] for line in output.getvalue().splitlines()]
             self.assertEqual(events, ["finalization-started", "ready"])
@@ -928,6 +958,118 @@ class ControllerAndCleanupTests(unittest.TestCase):
                 updated = finalization_queue.mark(path, "film-links", "complete", note="verified")
                 links = next(item for item in updated["tasks"] if item["name"] == "film-links")
                 self.assertEqual(links["status"], "complete")
+
+    def test_movie_artifacts_are_prepared_without_per_file_orchestration(self):
+        tiny_png = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Z8l8AAAAASUVORK5CYII="
+        )
+        subtitle = "\n\n".join([
+            "1\n00:00:00,000 --> 00:00:05,000\nOne",
+            "2\n00:10:00,000 --> 00:10:05,000\nTwo",
+            "3\n00:30:00,000 --> 00:30:05,000\nThree",
+            "4\n00:50:00,000 --> 00:50:05,000\nFour",
+            "5\n01:35:00,000 --> 01:35:05,000\nFive",
+        ]).encode() + b"\n"
+        meta = {
+            "id": "tt1234567", "name": "Example", "year": "2024",
+            "director": ["Director"], "description": "Plot", "runtime": "100 min",
+            "genre": ["Drama"], "imdbRating": "7.5", "moviedb_id": 42,
+            "released": "2024-01-02T00:00:00.000Z",
+        }
+        with tempfile.TemporaryDirectory() as raw:
+            env = roots(Path(raw))
+            with patch.dict(os.environ, env, clear=False):
+                path = job_manifest.create_job(
+                    "movie", "Example", 2024,
+                    {"identity": {"ids": {"imdb": "tt1234567"}}},
+                )
+                job_manifest.update_job(path, {"state": "downloading"})
+                with (
+                    patch.object(prepare_artifacts.cinemeta, "metadata", return_value=meta),
+                    patch.object(prepare_artifacts.cinemeta, "artwork", return_value=tiny_png),
+                    patch.object(prepare_artifacts, "subtitle_bytes", return_value=subtitle),
+                ):
+                    result = prepare_artifacts.prepare(path)
+                _, job = job_manifest.load_job(path)
+                root = finalization_queue.artifact_root(job)
+                metadata = json.loads((root / "metadata.json").read_text())
+            self.assertTrue(result["automated"])
+            self.assertTrue(result["ready"])
+            self.assertTrue(all(
+                item["status"] == "complete"
+                for item in finalization_queue.task_state(job).values()
+            ))
+            self.assertEqual(metadata["directors"], ["Director"])
+            self.assertEqual(metadata["uniqueids"]["imdb"], "tt1234567")
+            self.assertTrue((root / "poster.png").is_file())
+            self.assertTrue((root / "subtitle.en.srt").is_file())
+            self.assertTrue((root / "subtitle.fr.srt").is_file())
+
+    def test_series_artifacts_include_episode_manifests_automatically(self):
+        tiny_png = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Z8l8AAAAASUVORK5CYII="
+        )
+        subtitle = b"1\n00:00:00,000 --> 00:00:01,000\nOne\n\n2\n00:00:02,000 --> 00:00:03,000\nTwo\n\n3\n00:00:04,000 --> 00:00:05,000\nThree\n\n4\n00:00:06,000 --> 00:00:07,000\nFour\n\n5\n00:00:08,000 --> 00:00:09,000\nFive\n"
+        meta = {
+            "id": "tt1234567", "name": "Example Show", "year": "2024",
+            "description": "Plot", "runtime": "45 min", "genre": ["Drama"],
+            "videos": [{
+                "id": "tt1234567:1:2", "name": "Second", "season": 1,
+                "episode": 2, "released": "2024-01-02T00:00:00.000Z",
+                "description": "Episode plot", "tvdb_id": 22,
+            }],
+        }
+        sources = [{
+            "source": "Example.Show.S01E02.mkv", "season": 1,
+            "episode": 2, "episode_end": None, "duration": None,
+        }]
+        with tempfile.TemporaryDirectory() as raw:
+            env = roots(Path(raw))
+            with patch.dict(os.environ, env, clear=False):
+                path = job_manifest.create_job(
+                    "series", "Example Show", 2024,
+                    {"identity": {"ids": {"imdb": "tt1234567"}}},
+                )
+                job_manifest.update_job(path, {"state": "downloading"})
+                with (
+                    patch.object(prepare_artifacts.cinemeta, "metadata", return_value=meta),
+                    patch.object(prepare_artifacts.cinemeta, "artwork", return_value=tiny_png),
+                    patch.object(prepare_artifacts, "active_episode_sources", return_value=sources),
+                    patch.object(prepare_artifacts, "subtitle_bytes", return_value=subtitle),
+                ):
+                    result = prepare_artifacts.prepare(path)
+                _, job = job_manifest.load_job(path)
+                root = finalization_queue.artifact_root(job)
+                metadata = json.loads((root / "metadata.json").read_text())
+                english = json.loads((root / "subtitle-en.json").read_text())
+                artwork = json.loads((root / "artwork.json").read_text())
+            self.assertTrue(result["ready"])
+            self.assertEqual(metadata["episodes"][0]["title"], "Second")
+            self.assertEqual(english["subtitles"][0]["source"], "Example.Show.S01E02.mkv")
+            self.assertIn("1", artwork["season_posters"])
+
+    def test_automated_subtitles_accept_verified_embedded_coverage(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            with (
+                patch.object(
+                    prepare_artifacts, "subtitle_bytes",
+                    side_effect=prepare_artifacts.ArtifactPreparationError("not found"),
+                ),
+                patch.object(prepare_artifacts, "active_movie_languages", return_value={"eng"}),
+            ):
+                result = prepare_artifacts.movie_subtitle(
+                    root / "job.json", root, "tt1234567", "en", 6000, None,
+                )
+            self.assertIn("embedded", result)
+
+            with patch.object(prepare_artifacts, "subtitle_bytes") as fetch:
+                manifest = prepare_artifacts.series_subtitle(root, "tt1234567", "fr", [{
+                    "source": "Show.S01E01.mkv", "season": 1, "episode": 1,
+                    "duration": 2400, "languages": ["fre"],
+                }])
+            fetch.assert_not_called()
+            self.assertEqual(json.loads(manifest.read_text())["subtitles"], [])
 
     def test_success_cleanup_keeps_only_provider_cache(self):
         with tempfile.TemporaryDirectory() as raw:

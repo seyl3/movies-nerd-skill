@@ -4,24 +4,21 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 import json
 from pathlib import Path
 import sys
-import time
+import threading
 
 from _common import emit_event
 import acquire
 from acquire import ControllerError, JobLock, TerminalAcquisitionError, bounded_integer
-from finalization_queue import required_tasks, start_all, task_state
 from finalize_job import FinalizeError, finalize
 from finalize_series import finalize as finalize_series
 from job_manifest import ManifestError, load_job
+import prepare_artifacts
+from prepare_artifacts import ArtifactPreparationError
 from qbittorrent_api import QbtAccessDenied, QbtError, QbtUnavailable
-
-
-def ready_for_finalization(job: dict) -> bool:
-    tasks = task_state(job)
-    return all(tasks[name].get("status") == "complete" for name in required_tasks(job))
 
 
 def run(
@@ -30,30 +27,38 @@ def run(
 ) -> dict:
     checked, job = load_job(job_path)
     with JobLock(checked, str(job["job_id"])):
-        transfer = acquire.run(
-            checked, poll_seconds=poll_seconds, max_seconds=0, acquire_lock=False,
+        stop_preparation = threading.Event()
+        preparer = ThreadPoolExecutor(max_workers=1, thread_name_prefix="movies-nerd-artifacts")
+        prepared = preparer.submit(
+            prepare_artifacts.prepare_when_started, checked, stop_preparation,
         )
+        try:
+            transfer = acquire.run(
+                checked, poll_seconds=poll_seconds, max_seconds=0, acquire_lock=False,
+            )
+        except Exception:
+            stop_preparation.set()
+            prepared.cancel()
+            preparer.shutdown(wait=False, cancel_futures=True)
+            raise
         _, job = load_job(checked)
-        if not job.get("enrichment_tasks"):
-            start_all(checked)
         identity = job["identity"]
         label = f"{identity['title']} ({identity['year']})"
         emit_event("finalization-started", title=label)
-        deadline = time.monotonic() + artifact_wait_seconds
-        while True:
-            _, job = load_job(checked)
-            if ready_for_finalization(job):
-                break
-            now = time.monotonic()
-            if now >= deadline:
-                return {
-                    "ready": False,
-                    "downloaded": bool(transfer.get("downloaded")),
-                    "resumable": True,
-                    "job": str(checked),
-                    "next": "finish the already-requested preparation and resume this same job",
-                }
-            time.sleep(min(2, max(0.1, deadline - now)))
+        try:
+            prepared.result(timeout=artifact_wait_seconds or None)
+        except FutureTimeout:
+            stop_preparation.set()
+            return {
+                "ready": False,
+                "downloaded": bool(transfer.get("downloaded")),
+                "resumable": True,
+                "job": str(checked),
+                "next": "resume the automated finalization preparation",
+            }
+        finally:
+            preparer.shutdown(wait=False, cancel_futures=True)
+        _, job = load_job(checked)
         result = finalize(checked) if job.get("kind") == "movie" else finalize_series(checked)
         if result.get("ready"):
             ready_details = {
@@ -110,7 +115,10 @@ def main() -> int:
     except TerminalAcquisitionError as exc:
         print(json.dumps({"error": str(exc), "cleaned_up": True, "terminal": True}), file=sys.stderr)
         return 2
-    except (ControllerError, FinalizeError, ManifestError, QbtError, OSError, ValueError) as exc:
+    except (
+        ArtifactPreparationError, ControllerError, FinalizeError, ManifestError,
+        QbtError, OSError, ValueError,
+    ) as exc:
         print(json.dumps({"error": str(exc), "resumable": True}), file=sys.stderr)
         return 2
 

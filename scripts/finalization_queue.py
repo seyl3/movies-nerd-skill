@@ -10,7 +10,7 @@ import sys
 import time
 
 from _common import remove_appledouble_sibling, stage_for_kind
-from job_manifest import ManifestError, load_job, update_job
+from job_manifest import ManifestError, job_update_lock, load_job, update_job
 
 MOVIE_TASKS = (
     "destination", "metadata", "artwork", "subtitle-en", "subtitle-fr",
@@ -20,7 +20,7 @@ SERIES_TASKS = (
     "destination", "metadata", "artwork", "subtitle-en", "subtitle-fr",
 )
 STATUSES = {"pending", "requested", "running", "complete", "failed"}
-ARTIFACT_TASKS = {"metadata", "artwork", "subtitle-en", "subtitle-fr"}
+ARTIFACT_TASKS = {"metadata", "artwork"}
 
 
 def required_tasks(job: dict) -> tuple[str, ...]:
@@ -54,25 +54,26 @@ def plan(job_path: Path) -> dict:
 
 
 def start_all(job_path: Path) -> dict:
-    checked, job = load_job(job_path)
-    if job.get("state") not in {"downloading", "stalled", "downloaded", "finalizing"}:
-        raise ManifestError("finalization preparation starts only after a transfer starts")
-    root = artifact_root(job)
-    if root.exists() and (root.is_symlink() or not root.is_dir()):
-        raise ManifestError("job artifact directory is unsafe")
-    root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    root.chmod(0o700)
-    remove_appledouble_sibling(root)
-    tasks = task_state(job)
-    for item in tasks.values():
-        if item.get("status") == "pending":
-            item.update({"status": "requested", "requested_epoch": time.time()})
-    update_job(checked, {
-        "enrichment_tasks": tasks,
-        "steps": {"enrichment": "running"},
-        "artifacts": {"enrichment_requested_at": time.time()},
-    })
-    return plan(checked)
+    with job_update_lock(job_path):
+        checked, job = load_job(job_path)
+        if job.get("state") not in {"downloading", "stalled", "downloaded", "finalizing"}:
+            raise ManifestError("finalization preparation starts only after a transfer starts")
+        root = artifact_root(job)
+        if root.exists() and (root.is_symlink() or not root.is_dir()):
+            raise ManifestError("job artifact directory is unsafe")
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        root.chmod(0o700)
+        remove_appledouble_sibling(root)
+        tasks = task_state(job)
+        for item in tasks.values():
+            if item.get("status") == "pending":
+                item.update({"status": "requested", "requested_epoch": time.time()})
+        update_job(checked, {
+            "enrichment_tasks": tasks,
+            "steps": {"enrichment": "running"},
+            "artifacts": {"enrichment_requested_at": time.time()},
+        })
+        return plan(checked)
 
 
 def artifact_root(job: dict) -> Path:
@@ -93,28 +94,29 @@ def mark(
     job_path: Path, task: str, status: str, artifact: Path | None = None,
     note: str | None = None,
 ) -> dict:
-    checked, job = load_job(job_path)
-    tasks = task_state(job)
-    if task not in tasks:
-        raise ManifestError("unknown finalization task for this media type")
-    if status not in STATUSES:
-        raise ManifestError("invalid finalization task status")
-    if status == "complete" and task in ARTIFACT_TASKS and artifact is None:
-        raise ManifestError(f"{task} needs a prepared artifact before completion")
-    item = dict(tasks[task])
-    item["status"] = status
-    item["updated_epoch"] = time.time()
-    if artifact:
-        item["artifact"] = checked_artifact(artifact, job)
-    if note:
-        item["note"] = " ".join(note.strip().split())[:300]
-    tasks[task] = item
-    ready = all(value.get("status") == "complete" for value in tasks.values())
-    update_job(checked, {
-        "enrichment_tasks": tasks,
-        "steps": {"enrichment": "complete" if ready else "running"},
-    })
-    return plan(checked)
+    with job_update_lock(job_path):
+        checked, job = load_job(job_path)
+        tasks = task_state(job)
+        if task not in tasks:
+            raise ManifestError("unknown finalization task for this media type")
+        if status not in STATUSES:
+            raise ManifestError("invalid finalization task status")
+        if status == "complete" and task in ARTIFACT_TASKS and artifact is None:
+            raise ManifestError(f"{task} needs a prepared artifact before completion")
+        item = dict(tasks[task])
+        item["status"] = status
+        item["updated_epoch"] = time.time()
+        if artifact:
+            item["artifact"] = checked_artifact(artifact, job)
+        if note:
+            item["note"] = " ".join(note.strip().split())[:300]
+        tasks[task] = item
+        ready = all(value.get("status") == "complete" for value in tasks.values())
+        update_job(checked, {
+            "enrichment_tasks": tasks,
+            "steps": {"enrichment": "complete" if ready else "running"},
+        })
+        return plan(checked)
 
 
 def main() -> int:

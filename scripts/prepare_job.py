@@ -9,6 +9,7 @@ import re
 import sys
 import time
 
+import cinemeta
 from _common import GIB, format_gib
 from job_manifest import ManifestError, create_job, record_search_value, remove_failed_job, transition_job
 from provider_health import HealthError, dead_hashes, record_provider
@@ -56,17 +57,27 @@ def prepare(
             "next": "ext-browser",
             "elapsed_ms": round((time.monotonic() - started) * 1000),
         }
+    resolved_imdb = imdb_id.lower() if imdb_id else None
+    if not resolved_imdb:
+        possible = [selection.get("primary"), *(selection.get("candidates") or [])]
+        resolved_imdb = next((
+            str(item.get("imdb_code") or "").lower()
+            for item in possible if isinstance(item, dict)
+            and re.fullmatch(r"tt[0-9]{5,12}", str(item.get("imdb_code") or "").lower())
+        ), None)
+    if not resolved_imdb:
+        resolved_imdb = cinemeta.resolve_imdb(kind, title, year)
     extra: dict = {"cache": {}}
     if runtime_minutes is not None:
         extra["cache"]["runtime_minutes"] = runtime_minutes
-    if imdb_id:
-        extra["identity"] = {"ids": {"imdb": imdb_id.lower()}}
+    if resolved_imdb:
+        extra["identity"] = {"ids": {"imdb": resolved_imdb}}
     path = create_job(kind, title, year, extra or None)
     result = {
         "query": query,
         "request": {
             "title": title, "year": year, "kind": kind,
-            "imdb_id": imdb_id.lower() if imdb_id else None,
+            "imdb_id": resolved_imdb,
         },
         "elapsed_ms": round((time.monotonic() - started) * 1000),
         "providers": providers,
@@ -133,7 +144,7 @@ def main() -> int:
         )
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result.get("prepared") else 4
-    except (ManifestError, SearchError, OSError, ValueError) as exc:
+    except (cinemeta.CinemetaError, ManifestError, SearchError, OSError, ValueError) as exc:
         print(json.dumps({"error": str(exc)}), file=sys.stderr)
         return 2
 
