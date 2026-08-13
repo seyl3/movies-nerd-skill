@@ -21,6 +21,7 @@ The user never sees the hidden candidate comparison, duplicate pruning, provider
 
 - Keep monitoring in the same task until the transfer completes, then finish verification, naming, sidecars, and import.
 - Keep `run_job.py` attached to the execution session; never background it. A yielded session identifier is a continuation handle, not permission to end the task.
+- Let `run_job.py` prepare metadata, artwork, and subtitles itself. Do not spend model turns calling or narrating one command per artifact, candidate, language, or status transition.
 - A bounded monitoring window ending while the transfer is healthy means continue monitoring automatically. It does not mean stop the task.
 - Allow only lifecycle output: download started, genuine stall/recovery or automatic source replacement, download completed, finalization started, and ready. Never narrate small percentage changes, periodic speed/ETA readings, or routine health polls. Use at most one user-facing progress note during a long transfer.
 - Do not ask the user to check back, send another message, or tell Movies Nerd when the download finishes.

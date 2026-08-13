@@ -2,7 +2,7 @@
 
 Movies Nerd is an opinionated all-in-one Codex skill for nontechnical film fans. Ask for one title or a batch and it starts automatically, then stays with every job until the library entries are ready.
 
-Version: **2.4.0**
+Version: **2.5.0**
 
 **Currently recommended:** use **GPT-5.6 Sol** with **High** reasoning.
 
@@ -13,6 +13,7 @@ Version: **2.4.0**
 - Keeps the movie job attached through download, finalization, cleanup, and the ready handoff instead of stopping after “downloading.”
 - Starts every successfully found title in a batch concurrently by default—six requested films means six active title downloads.
 - Emits only meaningful lifecycle events, without repetitive percentage updates or manual sleep/status loops.
+- Prepares metadata, original artwork, and English/French subtitles through one internal controller instead of spending model turns on each sidecar.
 - Fully organizes series into show/season folders with show and episode NFOs, show/season artwork, per-episode English/French subtitles, specials, and multi-episode files.
 - Prefers efficient 4K up to 15 GiB or space-efficient 1080p, MKV, original audio, and no extras.
 - Adds clean names, NFO metadata, posters, fanart, track labels, and English/French subtitles through a no-key, no-browser default provider.
