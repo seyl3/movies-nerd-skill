@@ -30,6 +30,7 @@ from remux_mkv import remux
 from select_payload import extract_selected, scan_payload
 from validate_subtitle import validate_bytes
 from write_nfo import render
+from title_policy import library_title
 
 EPISODE_RE = re.compile(r"(?i)(?:^|[^A-Z0-9])S(\d{1,2})E(\d{1,3})(?:[-_. ]?E?(\d{1,3}))?")
 
@@ -48,7 +49,7 @@ def checked_metadata(job: dict) -> tuple[dict, list[dict]]:
         key: child for key, child in value.items() if key != "episodes"
     }
     identity = job["identity"]
-    if str(show.get("title") or "").strip().casefold() != str(identity["title"]).casefold():
+    if str(show.get("title") or "").strip().casefold() != library_title(job).casefold():
         raise FinalizeError("series metadata title does not match the job")
     if int(show.get("year") or 0) != int(identity["year"]):
         raise FinalizeError("series metadata year does not match the job")
@@ -254,7 +255,7 @@ def finalize(job_path: Path) -> dict:
     checked, job = load_job(job_path)
     if job.get("kind") != "series":
         raise FinalizeError("series finalization requires a series job")
-    destination = checked_destination(job["identity"]["title"], int(job["identity"]["year"]))
+    destination = checked_destination(library_title(job), int(job["identity"]["year"]))
     client = connected_client(wait_seconds=20)
     if job.get("state") == "imported":
         removed = remove_all_owned(client, job)

@@ -16,10 +16,11 @@ import threading
 import time
 
 import cinemeta
+import wikidata_titles
 from _common import remove_appledouble_sibling
 from check_subtitles import embedded_languages
 from finalization_queue import artifact_root, mark, plan, start_all, task_state
-from job_manifest import ManifestError, load_job
+from job_manifest import ManifestError, load_job, update_job
 from opensubtitles_api import SubtitleApiError, api_json, api_key, fetch_download
 from qbittorrent_api import (
     QbtError, checked_movies_nerd_transfer, connected_client, normalize_hash,
@@ -29,6 +30,7 @@ from stremio_subtitles import (
     LANGUAGE_CODES, StremioSubtitleError, checked_download_url, fetch_srt, service_json,
 )
 from validate_subtitle import media_duration, validate_bytes
+from title_policy import decide, from_job as title_policy_from_job, language_code, library_title
 
 EPISODE_RE = re.compile(
     r"(?i)(?:^|[^A-Z0-9])S(\d{1,2})E(\d{1,3})(?:[-_. ]?E?(\d{1,3}))?"
@@ -106,8 +108,11 @@ def movie_metadata(job: dict, meta: dict, imdb_id: str) -> dict:
         raise ArtifactPreparationError("authoritative movie metadata has no director")
     runtime = runtime_minutes(meta.get("runtime"))
     value = {
-        "title": job["identity"]["title"],
-        "originaltitle": str(meta.get("name") or job["identity"]["title"]),
+        "title": library_title(job),
+        "originaltitle": str(
+            title_policy_from_job(job).get("original_title")
+            or meta.get("name") or job["identity"]["title"]
+        ),
         "year": int(job["identity"]["year"]),
         "plot": str(meta.get("description") or ""),
         "premiered": date_only(meta.get("released")),
@@ -127,8 +132,11 @@ def movie_metadata(job: dict, meta: dict, imdb_id: str) -> dict:
 def show_metadata(job: dict, meta: dict, imdb_id: str) -> dict:
     runtime = runtime_minutes(meta.get("runtime"))
     value = {
-        "title": job["identity"]["title"],
-        "originaltitle": str(meta.get("name") or job["identity"]["title"]),
+        "title": library_title(job),
+        "originaltitle": str(
+            title_policy_from_job(job).get("original_title")
+            or meta.get("name") or job["identity"]["title"]
+        ),
         "year": int(job["identity"]["year"]),
         "plot": str(meta.get("description") or ""),
         "premiered": date_only(meta.get("released")),
@@ -427,6 +435,39 @@ def run_task(job_path: Path, name: str, work) -> dict:
         return {"task": name, "status": "failed", "error": str(exc)}
 
 
+def release_language(job: dict) -> str | None:
+    releases = [job.get("release"), *(job.get("candidate_pool") or [])]
+    for release in releases:
+        if not isinstance(release, dict):
+            continue
+        code = language_code(release.get("language"))
+        if code:
+            return code
+    return None
+
+
+def enrich_title_policy(job_path: Path, job: dict, meta: dict, imdb_id: str) -> dict:
+    current = title_policy_from_job(job)
+    try:
+        facts = wikidata_titles.title_facts(imdb_id)
+    except wikidata_titles.WikidataTitleError:
+        facts = {}
+    languages = facts.get("original_languages") or []
+    if not languages:
+        fallback_language = release_language(job)
+        languages = [fallback_language] if fallback_language else []
+    policy = decide(
+        requested_title=current.get("requested_title") or job["identity"]["title"],
+        canonical_title=meta.get("name") or current.get("canonical_title") or job["identity"]["title"],
+        original_title=facts.get("original_title") or current.get("original_title") or meta.get("name"),
+        french_title=facts.get("french_title") or current.get("french_title"),
+        english_title=facts.get("english_title") or current.get("english_title") or meta.get("name"),
+        original_languages=languages,
+    )
+    update_job(job_path, {"cache": {"title_policy": policy}})
+    return load_job(job_path)[1]
+
+
 def prepare(job_path: Path, stop: threading.Event | None = None) -> dict:
     checked, job = load_job(job_path)
     if all(item.get("status") == "complete" for item in task_state(job).values()):
@@ -441,6 +482,7 @@ def prepare(job_path: Path, stop: threading.Event | None = None) -> dict:
     meta_year = cinemeta.release_year(meta.get("year") or meta.get("releaseInfo"))
     if meta_year != int(identity["year"]):
         raise ArtifactPreparationError("authoritative metadata year does not match the job")
+    job = enrich_title_policy(checked, job, meta, imdb_id)
     root = artifact_root(job)
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
     jobs = {

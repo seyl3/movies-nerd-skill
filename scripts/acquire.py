@@ -30,6 +30,7 @@ from race_candidates import (
     candidate_hash, pool_from_job, race, remove_and_verify, remove_quietly,
 )
 from search_releases import checked_query, release_selection, search_all
+from title_policy import search_titles as job_search_titles
 
 
 class ControllerError(RuntimeError):
@@ -119,7 +120,8 @@ def _runtime(job: dict) -> float | None:
 
 def refresh_candidates(job_path: Path, job: dict, excluded: set[str]) -> list[dict]:
     identity = job["identity"]
-    title = str(identity["title"])
+    aliases = job_search_titles(job)
+    title = aliases[0]
     year = int(identity["year"])
     envelope = job.get("confirmation_envelope") or {}
     quality = str(envelope.get("quality") or "")
@@ -131,9 +133,10 @@ def refresh_candidates(job_path: Path, job: dict, excluded: set[str]) -> list[di
         title=title, year=year, max_bytes=max_bytes,
         runtime_minutes=_runtime(job), imdb_id=imdb_id,
         excluded_hashes=excluded,
+        search_titles=aliases,
     )
     selection = release_selection(
-        results, title, year, max_bytes, _runtime(job),
+        results, aliases, year, max_bytes, _runtime(job),
         kind=job["kind"], excluded_hashes=excluded,
     )
     candidates = [

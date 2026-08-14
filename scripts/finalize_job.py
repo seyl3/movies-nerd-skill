@@ -31,6 +31,7 @@ from remux_mkv import LANG_NORMALIZE, remux
 from select_payload import extract_selected, scan_payload
 from validate_subtitle import validate_bytes
 from write_nfo import render
+from title_policy import library_title
 
 MAX_ARTWORK_BYTES = 50 * 1024 * 1024
 
@@ -64,7 +65,7 @@ def optional_artifact(job: dict, name: str) -> Path | None:
 def checked_metadata(job: dict) -> dict:
     value = read_json(required_artifact(job, "metadata"), 1024 * 1024)
     identity = job["identity"]
-    if str(value.get("title") or "").strip().casefold() != str(identity["title"]).casefold():
+    if str(value.get("title") or "").strip().casefold() != library_title(job).casefold():
         raise FinalizeError("metadata title does not match the job")
     if int(value.get("year") or 0) != int(identity["year"]):
         raise FinalizeError("metadata year does not match the job")
@@ -464,7 +465,7 @@ def finalize(job_path: Path) -> dict:
     probe = selected[0]["probe"]
     duration = float(selected[0]["duration_seconds"])
     plan = movie_plan(SimpleNamespace(
-        title=job["identity"]["title"], year=int(job["identity"]["year"]),
+        title=library_title(job), year=int(job["identity"]["year"]),
         director=str(metadata["directors"][0]), resolution=resolution_tag(probe),
     ))
     destination = checked_destination(Path(plan["folder"]))

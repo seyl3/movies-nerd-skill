@@ -445,7 +445,7 @@ def checked_release(value: object) -> dict:
             "title", "source", "provider", "size_bytes", "size", "resolution",
             "seeders", "leechers", "score", "warnings", "magnet", "info_hash",
             "torrent_url", "direct_metadata", "reported_peer_health",
-            "provider_reliability_bonus",
+            "provider_reliability_bonus", "canonical_title", "language",
         )
     }
     if not str(fields["title"] or "").strip() or not str(fields["source"] or "").strip():

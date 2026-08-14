@@ -40,6 +40,8 @@ import qbittorrent_api as qbt
 import race_candidates
 import search_releases
 import torrent_metadata
+import title_policy
+import wikidata_titles
 
 
 def bencode(value) -> bytes:
@@ -211,6 +213,10 @@ class HealthAndStateTests(unittest.TestCase):
                     prepare_job, "search_all",
                     return_value=(items, {"yts": {"ok": True, "results": 2, "latency_ms": 25}}, True),
                 ),
+                patch.object(
+                    cinemeta, "metadata",
+                    return_value={"name": "Example", "year": "2024"},
+                ),
                 patch.object(prepare_job, "record_provider"),
             ):
                 result = prepare_job.prepare(
@@ -240,7 +246,10 @@ class HealthAndStateTests(unittest.TestCase):
                     return_value=(items, {"apibay": {"ok": True, "results": 1, "latency_ms": 25}}, True),
                 ),
                 patch.object(prepare_job, "record_provider"),
-                patch.object(cinemeta, "resolve_imdb", return_value="tt7654321") as resolve,
+                patch.object(
+                    cinemeta, "resolve_identity",
+                    return_value={"imdb_id": "tt7654321", "canonical_title": "Example"},
+                ) as resolve,
             ):
                 result = prepare_job.prepare(
                     title="Example", year=2024, kind="movie",

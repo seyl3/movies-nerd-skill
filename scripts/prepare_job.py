@@ -16,13 +16,29 @@ from provider_health import HealthError, dead_hashes, record_provider
 from search_releases import (
     PROVIDER_LABELS, SearchError, checked_query, release_selection, safe_int, search_all,
 )
+from title_policy import decide
 
 
 def prepare(
     *, title: str, year: int, kind: str, runtime_minutes: float | None,
     imdb_id: str | None, max_gib: float, timeout: float,
 ) -> dict:
-    query = checked_query(title, year)
+    requested_title = title
+    if imdb_id:
+        resolved_imdb = imdb_id.lower()
+        meta = cinemeta.metadata(kind, resolved_imdb)
+        meta_year = cinemeta.release_year(meta.get("year") or meta.get("releaseInfo"))
+        if meta_year != year:
+            raise cinemeta.CinemetaError("the supplied IMDb ID does not match the requested year")
+        canonical_title = " ".join(str(meta.get("name") or title).split())
+    else:
+        resolved = cinemeta.resolve_identity(kind, title, year)
+        resolved_imdb = str(resolved["imdb_id"]).lower()
+        canonical_title = str(resolved["canonical_title"])
+    policy = decide(requested_title=requested_title, canonical_title=canonical_title)
+    aliases = policy["search_titles"]
+    canonical_title = aliases[0]
+    query = checked_query(canonical_title, year)
     max_bytes = int(max_gib * GIB)
     try:
         excluded = dead_hashes(kind)
@@ -31,9 +47,10 @@ def prepare(
     started = time.monotonic()
     results, providers, early_success = search_all(
         query, timeout, kind == "series", True,
-        title=title, year=year, max_bytes=max_bytes,
-        runtime_minutes=runtime_minutes, imdb_id=imdb_id,
+        title=canonical_title, year=year, max_bytes=max_bytes,
+        runtime_minutes=runtime_minutes, imdb_id=resolved_imdb,
         excluded_hashes=excluded,
+        search_titles=aliases,
     )
     for name, report in providers.items():
         if "latency_ms" not in report:
@@ -47,7 +64,7 @@ def prepare(
         except (HealthError, OSError, ValueError):
             pass
     selection = release_selection(
-        results, title, year, max_bytes, runtime_minutes,
+        results, aliases, year, max_bytes, runtime_minutes,
         kind=kind, excluded_hashes=excluded,
     )
     if not selection.get("primary"):
@@ -57,26 +74,17 @@ def prepare(
             "next": "ext-browser",
             "elapsed_ms": round((time.monotonic() - started) * 1000),
         }
-    resolved_imdb = imdb_id.lower() if imdb_id else None
-    if not resolved_imdb:
-        possible = [selection.get("primary"), *(selection.get("candidates") or [])]
-        resolved_imdb = next((
-            str(item.get("imdb_code") or "").lower()
-            for item in possible if isinstance(item, dict)
-            and re.fullmatch(r"tt[0-9]{5,12}", str(item.get("imdb_code") or "").lower())
-        ), None)
-    if not resolved_imdb:
-        resolved_imdb = cinemeta.resolve_imdb(kind, title, year)
-    extra: dict = {"cache": {}}
+    extra: dict = {"cache": {"title_policy": policy}}
     if runtime_minutes is not None:
         extra["cache"]["runtime_minutes"] = runtime_minutes
     if resolved_imdb:
         extra["identity"] = {"ids": {"imdb": resolved_imdb}}
-    path = create_job(kind, title, year, extra or None)
+    path = create_job(kind, canonical_title, year, extra or None)
     result = {
         "query": query,
         "request": {
-            "title": title, "year": year, "kind": kind,
+            "title": canonical_title, "requested_title": requested_title,
+            "year": year, "kind": kind,
             "imdb_id": resolved_imdb,
         },
         "elapsed_ms": round((time.monotonic() - started) * 1000),
@@ -102,7 +110,7 @@ def prepare(
     return {
         "prepared": True,
         "job": str(path),
-        "title": f"{title} ({year})",
+        "title": f"{policy['display_title']} ({year})",
         "quality": envelope.get("quality") or primary.get("resolution"),
         "maximum_size": format_gib(int(envelope.get("max_size_bytes") or primary["size_bytes"])),
         "recommended_size": format_gib(int(primary["size_bytes"])),

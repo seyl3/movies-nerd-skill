@@ -22,6 +22,7 @@ from provider_health import HealthError, dead_hashes, provider_bonus, record_pro
 from qbittorrent_api import QbtError, connected_client, magnet_hash, safe_magnet
 from rank_releases import normalize
 from torrent_metadata import TorrentMetadataError, checked_torrent_url
+from title_policy import unique_titles
 
 ALLOWED_API_HOSTS = {"api.knaben.org", "apibay.org", "magnetz.eu", "movies-api.accel.li", "yts.gg"}
 MAX_RESPONSE_BYTES = 5 * 1024 * 1024
@@ -310,6 +311,8 @@ def normalize_yts(payload: object) -> list[dict]:
                 "info_hash": info_hash,
                 "torrent_url": torrent_url,
                 "imdb_code": imdb_code if re.fullmatch(r"tt\d{7,10}", imdb_code) else None,
+                "canonical_title": str(movie.get("title_english") or movie_title).strip(),
+                "language": str(movie.get("language") or "").strip() or None,
                 "direct_metadata": bool(torrent_url),
             })
     return results
@@ -444,20 +447,27 @@ def title_tokens(value: object) -> list[str]:
     return re.findall(r"\w+", folded, re.UNICODE)
 
 
-def matches_requested_title(release_title: object, title: str, year: int | None) -> bool:
+def matches_requested_title(
+    release_title: object, title: str | list[str] | tuple[str, ...],
+    year: int | None,
+) -> bool:
     release = title_tokens(release_title)
-    expected = title_tokens(title)
-    if not expected or len(release) < len(expected):
-        return False
-    phrase_found = any(
-        release[index:index + len(expected)] == expected
-        for index in range(len(release) - len(expected) + 1)
-    )
-    return phrase_found and (year is None or str(year) in release)
+    titles = title if isinstance(title, (list, tuple)) else [title]
+    for candidate in titles:
+        expected = title_tokens(candidate)
+        if not expected or len(release) < len(expected):
+            continue
+        phrase_found = any(
+            release[index:index + len(expected)] == expected
+            for index in range(len(release) - len(expected) + 1)
+        )
+        if phrase_found and (year is None or str(year) in release):
+            return True
+    return False
 
 
 def usable_count(
-    results: list[dict], title: str, year: int | None, max_bytes: int,
+    results: list[dict], title: str | list[str], year: int | None, max_bytes: int,
     runtime_minutes: float | None, excluded_hashes: set[str] | None = None,
 ) -> int:
     excluded = excluded_hashes or set()
@@ -488,7 +498,7 @@ def source_key(value: object) -> str:
 
 
 def release_selection(
-    results: list[dict], title: str, year: int | None, max_bytes: int,
+    results: list[dict], title: str | list[str], year: int | None, max_bytes: int,
     runtime_minutes: float | None, *, kind: str | None = None,
     excluded_hashes: set[str] | None = None,
 ) -> dict:
@@ -530,6 +540,8 @@ def release_selection(
             "direct_metadata": bool(item.get("torrent_url")),
             "reported_peer_health": "estimate",
             "provider_reliability_bonus": reliability,
+            "canonical_title": item.get("canonical_title"),
+            "language": item.get("language"),
         })
     candidates.sort(key=lambda item: (item["score"], item["seeders"]), reverse=True)
     primary = candidates[0] if candidates else None
@@ -626,23 +638,51 @@ def run_providers(providers: dict[str, object], timeout: float) -> tuple[list[di
     return combined, reports
 
 
+def search_title_aliases(
+    searcher, titles: list[str], year: int | None, timeout: float,
+) -> list[dict]:
+    aliases = unique_titles(titles)
+    started = time.monotonic()
+    combined = []
+    last_error: Exception | None = None
+    for index, title in enumerate(aliases):
+        remaining = timeout - (time.monotonic() - started)
+        if remaining <= 0:
+            break
+        requests_left = len(aliases) - index
+        per_request = max(0.1, remaining / requests_left)
+        try:
+            items = searcher(checked_query(title, year), per_request)
+        except (SearchError, QbtError, OSError) as exc:
+            last_error = exc
+            continue
+        combined.extend(items)
+        if any(matches_requested_title(item.get("title"), aliases[:index + 1], year) for item in items):
+            break
+    if not combined and last_error is not None:
+        raise last_error
+    return deduplicate(combined)
+
+
 def search_all(
     query: str, timeout: float, series: bool, use_qbt: bool, *, title: str,
     year: int | None, max_bytes: int, runtime_minutes: float | None,
     minimum_usable: int = 3, imdb_id: str | None = None,
     excluded_hashes: set[str] | None = None,
+    search_titles: list[str] | None = None,
 ) -> tuple[list[dict], dict, bool]:
     started = time.monotonic()
     fast_timeout = min(3.5, timeout)
+    aliases = unique_titles(search_titles or [], title)
     combined, reports = run_providers({
-        "knaben": lambda: search_knaben(query, fast_timeout),
-        "apibay": lambda: search_apibay(query, fast_timeout),
-        "magnetz": lambda: search_magnetz(query, fast_timeout),
-        "yts": lambda: search_yts(title, fast_timeout, imdb_id),
+        "knaben": lambda: search_title_aliases(search_knaben, aliases, year, fast_timeout),
+        "apibay": lambda: search_title_aliases(search_apibay, aliases, year, fast_timeout),
+        "magnetz": lambda: search_title_aliases(search_magnetz, aliases, year, fast_timeout),
+        "yts": lambda: search_yts(aliases[0], fast_timeout, imdb_id),
     }, fast_timeout)
     combined = deduplicate(combined)
     fast_selection = release_selection(
-        combined, title, year, max_bytes, runtime_minutes,
+        combined, aliases, year, max_bytes, runtime_minutes,
         excluded_hashes=excluded_hashes,
     )
     early_success = (

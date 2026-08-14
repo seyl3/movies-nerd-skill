@@ -19,6 +19,7 @@ from job_manifest import ManifestError, load_job
 import prepare_artifacts
 from prepare_artifacts import ArtifactPreparationError
 from qbittorrent_api import QbtAccessDenied, QbtError, QbtUnavailable
+from title_policy import library_title
 
 
 def run(
@@ -43,7 +44,7 @@ def run(
             raise
         _, job = load_job(checked)
         identity = job["identity"]
-        label = f"{identity['title']} ({identity['year']})"
+        label = f"{library_title(job)} ({identity['year']})"
         emit_event("finalization-started", title=label)
         try:
             prepared.result(timeout=artifact_wait_seconds or None)
