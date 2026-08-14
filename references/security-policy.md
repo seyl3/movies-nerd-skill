@@ -10,7 +10,7 @@
 - Never use `shell=True`, `eval`, or shell interpolation with untrusted data.
 - Connect to qBittorrent only on loopback. Keep all credentials in environment variables or an approved secret store and never print or persist them.
 - Never bypass CAPTCHAs, Cloudflare, access controls, geographic restrictions, or browser warnings.
-- Restrict direct search, direct-torrent, subtitle, and EXT traffic to each bundled script's fixed HTTPS allowlist. Never trust random mirrors.
+- Restrict direct search, direct-torrent, title-metadata, subtitle, and EXT traffic to each bundled script's fixed HTTPS allowlist. The title resolver sends only an IMDb ID to Wikidata's read-only API and validates the returned entity contains that exact ID. Never trust random mirrors.
 - Never transmit private library paths, local filenames, browser cookies, credentials, or inventory data to a provider.
 
 ## Gate 1 — metadata before full transfer

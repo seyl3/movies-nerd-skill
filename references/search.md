@@ -4,12 +4,19 @@ Treat speed as a correctness requirement. Under a healthy connection, target a u
 
 ## Discovery
 
-1. Run `scripts/prepare_job.py` first. It queries YTS, Knaben, APIBay, and Magnetz concurrently under one shared deadline, uses configured qBittorrent/Torznab providers only when the fast APIs do not produce enough exact candidates, and records the result directly in the new job manifest. No caller-managed search JSON file is needed.
+1. Run `scripts/prepare_job.py` first. It resolves the requested wording to an exact IMDb identity and canonical title before querying YTS, Knaben, APIBay, and Magnetz concurrently under one shared deadline. It uses configured qBittorrent/Torznab providers only when the fast APIs do not produce enough exact candidates and records the result directly in the new job manifest. No caller-managed search JSON file is needed.
 2. Pass the exact IMDb ID with `--imdb-id` whenever known. YTS is the movie fast path. Prefer its allowlisted direct `.torrent` URL because `torrent_metadata.py` validates its bencoding, size, paths, and info hash before qBittorrent receives it. If direct metadata fails, use the tracker-aware magnet for the same hash.
-3. Treat reported seed counts only as discovery hints. Zero reported seeders does not disqualify a release. The bounded live qBittorrent probe decides swarm health.
-4. Deduplicate by info hash and prefer the same hash's validated direct-metadata record. Exclude hashes remembered as dead for 72 hours. Use provider latency and recent success only as a small ranking adjustment.
-5. Preserve up to six same-quality candidates within the displayed maximum-size envelope: two hidden waves of at most three simultaneous probes. Prefer source diversity, then distinct hashes.
-6. Use EXT only when every API candidate is unsuitable or the user explicitly requests it. Never open EXT merely to compare against a usable API result.
+3. Choose query aliases by original language, independently of the final library spelling:
+
+   - English original: original English title first, then the requested French alias.
+   - French original: original French title first.
+   - Any other language: established English/international title first, original title second, French/requested title third.
+
+   Query at most three deduplicated aliases. Within each provider, stop after the first alias that produces an exact title/year match so aliases do not multiply routine traffic or latency.
+4. Treat reported seed counts only as discovery hints. Zero reported seeders does not disqualify a release. The bounded live qBittorrent probe decides swarm health.
+5. Deduplicate by info hash and prefer the same hash's validated direct-metadata record. Exclude hashes remembered as dead for 72 hours. Use provider latency and recent success only as a small ranking adjustment.
+6. Preserve up to six same-quality candidates within the displayed maximum-size envelope: two hidden waves of at most three simultaneous probes. Prefer source diversity, then distinct hashes.
+7. Use EXT only when every API candidate is unsuitable or the user explicitly requests it. Never open EXT merely to compare against a usable API result.
 
 ## Live selection after request authorization
 

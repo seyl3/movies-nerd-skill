@@ -44,7 +44,10 @@ Root: `<MOVIES_ROOT>`
     clearlogo.png
 ```
 
-- Preserve the authoritative display title and year.
+- Resolve titles by exact IMDb identity rather than assuming the user's wording is the original title.
+- If the authoritative original title itself is English or French, use it alone: `The Great Escape (1963)` and `La Collectionneuse (1967)`. Do not classify a multilingual film from all of its spoken languages.
+- For an original title in every other language, use the French title followed by the original title in parentheses: `Tout sur ma mère (Todo sobre mi madre) (1999)`. Do not add a duplicate parenthetical when both titles are identical.
+- Use that resolved display title consistently for the folder, video, NFO, poster, and subtitle basename. Store the unmodified original title in the NFO `originaltitle` field.
 - Use `[2160p]`, `[1080p]`, `[720p]`, `[576p]`, or `[480p]`; do not include codec, source, audio, release-group, or website spam in the final filename.
 - Group by director. Use `Other` when that director has no other major movie in the collection or the title is their only major feature. When a second major movie by that director is added, create the director folder and move both films out of `Other`.
 - Name the main poster exactly `<Title> (<Year>).png` for compatibility with the existing collection.
