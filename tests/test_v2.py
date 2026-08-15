@@ -543,6 +543,14 @@ class ControllerAndCleanupTests(unittest.TestCase):
                         for name in finalization_queue.MOVIE_TASKS
                     },
                 })
+                _, prepared_job = job_manifest.load_job(path)
+                context_root = finalization_queue.artifact_root(prepared_job)
+                context_root.mkdir(parents=True)
+                (context_root / "recommendation-context.json").write_text(json.dumps({
+                    "owned_count": 2,
+                    "completed_director": "Director",
+                    "owned_by_director": {"Director": ["Example (2024)"]},
+                }), encoding="utf-8")
                 output = io.StringIO()
                 with (
                     patch.object(acquire, "run", return_value={"downloaded": True}),
@@ -557,6 +565,7 @@ class ControllerAndCleanupTests(unittest.TestCase):
                 _, job = job_manifest.load_job(path)
                 lock = path.parent.parent / "locks" / f"{job['job_id']}.lock"
             self.assertTrue(result["ready"])
+            self.assertEqual(result["recommendation_context"]["completed_director"], "Director")
             self.assertFalse(lock.exists())
             artifacts.assert_called_once()
             finish.assert_called_once()

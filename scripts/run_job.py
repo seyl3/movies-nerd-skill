@@ -13,9 +13,10 @@ import threading
 from _common import emit_event
 import acquire
 from acquire import ControllerError, JobLock, TerminalAcquisitionError, bounded_integer
+from finalization_queue import artifact_root
 from finalize_job import FinalizeError, finalize
 from finalize_series import finalize as finalize_series
-from job_manifest import ManifestError, load_job
+from job_manifest import ManifestError, load_job, read_json
 import prepare_artifacts
 from prepare_artifacts import ArtifactPreparationError
 from qbittorrent_api import QbtAccessDenied, QbtError, QbtUnavailable
@@ -60,8 +61,15 @@ def run(
         finally:
             preparer.shutdown(wait=False, cancel_futures=True)
         _, job = load_job(checked)
+        recommendation_context = None
+        if job.get("kind") == "movie":
+            context_path = artifact_root(job) / "recommendation-context.json"
+            if context_path.is_file() and not context_path.is_symlink():
+                recommendation_context = read_json(context_path)
         result = finalize(checked) if job.get("kind") == "movie" else finalize_series(checked)
         if result.get("ready"):
+            if recommendation_context is not None:
+                result["recommendation_context"] = recommendation_context
             ready_details = {
                 key: result[key]
                 for key in (
@@ -70,6 +78,7 @@ def run(
                     "letterboxd",
                     "senscritique",
                     "recommendations",
+                    "recommendation_context",
                     "episodes",
                     "seasons",
                 )

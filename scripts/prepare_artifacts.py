@@ -17,10 +17,11 @@ import time
 
 import cinemeta
 import wikidata_titles
-from _common import remove_appledouble_sibling
+from _common import remove_appledouble_sibling, root_for_kind
 from check_subtitles import embedded_languages
 from finalization_queue import artifact_root, mark, plan, start_all, task_state
 from job_manifest import ManifestError, load_job, update_job
+import library_inventory
 from opensubtitles_api import SubtitleApiError, api_json, api_key, fetch_download
 from qbittorrent_api import (
     QbtError, checked_movies_nerd_transfer, connected_client, normalize_hash,
@@ -127,6 +128,17 @@ def movie_metadata(job: dict, meta: dict, imdb_id: str) -> dict:
         "recommendations": [],
     }
     return {key: child for key, child in value.items() if child is not None and child != ""}
+
+
+def movie_recommendation_context(job: dict, meta: dict) -> dict:
+    directors = list_text(meta.get("director"))
+    if not directors:
+        raise ArtifactPreparationError("authoritative movie metadata has no director")
+    return library_inventory.recommendation_context(
+        root_for_kind("movie"),
+        title=library_title(job), year=int(job["identity"]["year"]),
+        director=directors[0],
+    )
 
 
 def show_metadata(job: dict, meta: dict, imdb_id: str) -> dict:
@@ -500,7 +512,10 @@ def prepare(job_path: Path, stop: threading.Event | None = None) -> dict:
                 checked, root, imdb_id, "fr", duration * 60 if duration else None, stop,
             ),
             "film-links": lambda: "stable Letterboxd IMDb link prepared; optional links remain non-blocking",
-            "recommendations": lambda: "recommendations remain optional and do not block import",
+            "recommendations": lambda: atomic_json(
+                root / "recommendation-context.json",
+                movie_recommendation_context(job, meta),
+            ),
         })
     else:
         with ThreadPoolExecutor(max_workers=1) as source_pool:

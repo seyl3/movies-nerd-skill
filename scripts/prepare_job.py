@@ -22,9 +22,23 @@ from title_policy import decide
 def prepare(
     *, title: str, year: int, kind: str, runtime_minutes: float | None,
     imdb_id: str | None, max_gib: float, timeout: float,
+    resolved_identity: dict | None = None,
 ) -> dict:
     requested_title = title
-    if imdb_id:
+    if resolved_identity is not None:
+        resolved_imdb = str(resolved_identity.get("imdb_id") or "").lower()
+        canonical_title = " ".join(str(resolved_identity.get("canonical_title") or "").split())
+        try:
+            resolved_year = int(resolved_identity.get("year"))
+        except (TypeError, ValueError) as exc:
+            raise cinemeta.CinemetaError("the resolved identity has no valid year") from exc
+        if (
+            not cinemeta.IMDB_RE.fullmatch(resolved_imdb)
+            or not canonical_title or resolved_year != year
+            or (imdb_id and imdb_id.lower() != resolved_imdb)
+        ):
+            raise cinemeta.CinemetaError("the resolved identity does not match the request")
+    elif imdb_id:
         resolved_imdb = imdb_id.lower()
         meta = cinemeta.metadata(kind, resolved_imdb)
         meta_year = cinemeta.release_year(meta.get("year") or meta.get("releaseInfo"))

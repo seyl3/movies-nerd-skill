@@ -126,29 +126,44 @@ def fetch_json(url: str) -> dict:
     return value
 
 
-def resolve_identity(kind: str, title: str, year: int) -> dict:
+def resolve_request(kind: str, title: str, year: int | None = None) -> dict:
     if kind not in {"movie", "series"}:
         raise CinemetaError("metadata kind must be movie or series")
     encoded = quote(" ".join(title.split()), safe="")
     result = fetch_json(f"{META_ORIGIN}/catalog/{kind}/top/search={encoded}.json")
     metas = [item for item in result.get("metas", []) if isinstance(item, dict)]
-    by_year = [item for item in metas if release_year(item.get("releaseInfo")) == year]
+    by_year = (
+        [item for item in metas if release_year(item.get("releaseInfo")) == year]
+        if year is not None else metas
+    )
     exact = []
     requested = normalized_title(title)
     for item in by_year:
         aliases = item.get("aliases") if isinstance(item.get("aliases"), list) else []
         if any(normalized_title(name) == requested for name in [item.get("name"), *aliases]):
             exact.append(item)
-    matches = exact or by_year
+    matches = exact or (by_year if year is not None or len(by_year) == 1 else [])
     if len(matches) != 1:
-        raise CinemetaError("the title and year did not resolve to one authoritative IMDb ID")
+        detail = "the title and year" if year is not None else "the title"
+        raise CinemetaError(f"{detail} did not resolve to one authoritative IMDb ID")
     identifier = str(matches[0].get("imdb_id") or matches[0].get("id") or "").lower()
     if not IMDB_RE.fullmatch(identifier):
         raise CinemetaError("the metadata service returned an invalid IMDb ID")
     canonical = " ".join(str(matches[0].get("name") or title).split())
     if not canonical:
         raise CinemetaError("the metadata service returned an empty canonical title")
-    return {"imdb_id": identifier, "canonical_title": canonical}
+    resolved_year = release_year(matches[0].get("releaseInfo"))
+    if resolved_year is None:
+        raise CinemetaError("the metadata service returned no release year")
+    return {
+        "imdb_id": identifier,
+        "canonical_title": canonical,
+        "year": resolved_year,
+    }
+
+
+def resolve_identity(kind: str, title: str, year: int) -> dict:
+    return resolve_request(kind, title, year)
 
 
 def resolve_imdb(kind: str, title: str, year: int) -> str:
