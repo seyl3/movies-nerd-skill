@@ -1,4 +1,4 @@
 interface:
   display_name: "Movies Nerd"
-  short_description: "Fast, self-healing movie and series downloads"
-  default_prompt: "Use $movies-nerd to quickly download and organize these requested titles without a redundant confirmation, with automatic failover, complete cleanup, and a watch-ready handoff."
+  short_description: "One-command movie and series downloads"
+  default_prompt: "Use $movies-nerd to download and organize these titles through its single foreground controller, with automatic failover, cleanup, and collection-aware recommendations."

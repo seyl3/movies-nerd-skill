@@ -111,3 +111,11 @@ python3 -m unittest discover -s tests -v
 ```
 
 The checker is read-only. Normal acquisition opens qBittorrent automatically. A `needs-local-app-access` status means the execution host must approve the local-app command; retry it through that host mechanism instead of telling the user the app is closed.
+
+Routine acquisition uses one foreground command from the installed skill directory:
+
+```sh
+scripts/movies-nerd download 'Volver (2006)' --library '/absolute/path/to/Films'
+```
+
+Pass more quoted `Title (Year)` values to the same command for a batch. The command resolves a unique missing year when possible, resumes an existing exact job after interruption, and returns only after the entry is ready or one genuine blocker remains.

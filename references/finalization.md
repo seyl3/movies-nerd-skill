@@ -8,9 +8,9 @@ The controller prepares these concurrently while a movie downloads; episode-spec
 - NFO metadata
 - Exact poster, plus fanart and clear logo when available
 - English and French subtitle lookup and staged validation
-- Verified direct Letterboxd/SensCritique links and two recommendations
+- A compact path-free recommendation context from one shallow library scan
 
-Keep every prepared file under the exact per-job artifact root. Metadata and artwork tasks carry regular files. Subtitle tasks carry validated SRT files or a bounded note only after completed-media inspection proves that language is embedded; series manifests may omit episodes with verified embedded coverage. Destination, film-link, and recommendation tasks carry bounded controller notes when optional data is unavailable. Metadata JSON includes the resolved display title, unmodified original title, year, directors, authoritative IDs, stable available links, and stream-language overrides only when known. Optional fanart and clear-logo files sit beside the poster. Do not probe incomplete video or write provisional stream data into final NFO files.
+Keep every prepared file under the exact per-job artifact root. Metadata and artwork tasks carry regular files. Subtitle tasks carry validated SRT files or a bounded note only after completed-media inspection proves that language is embedded; series manifests may omit episodes with verified embedded coverage. The movie recommendation task carries `recommendation-context.json`, created once from shallow director/movie folder names with a bounded NFO read only for entries under `Other`; it contains no local paths and is returned before job cleanup. Metadata JSON includes the resolved display title, unmodified original title, year, directors, authoritative IDs, stable available links, and stream-language overrides only when known. Optional fanart and clear-logo files sit beside the poster. Do not probe incomplete video or write provisional stream data into final NFO files.
 
 The routine model path is exactly one `prepare_job.py` call followed by one attached `run_job.py` call. Do not inspect task state repeatedly, invoke provider scripts separately, parse their verbose candidate output, or call `finalization_queue.py mark`. Those actions waste tokens and can race the controller.
 

@@ -2,13 +2,14 @@
 
 Movies Nerd is an opinionated all-in-one Codex skill for nontechnical film fans. Ask for one title or a batch and it starts automatically, then stays with every job until the library entries are ready.
 
-Version: **2.6.0**
+Version: **2.7.0**
 
 **Currently recommended:** use **GPT-5.6 Sol** with **High** reasoning.
 
 ## What it does
 
 - Searches YTS, Knaben, APIBay, Magnetz, configured Torznab providers, then EXT only as a last resort.
+- Runs the complete workflow through one foreground `movies-nerd download ...` command; the model never has to pass a generated job file between scripts.
 - Understands French request titles: it resolves the exact movie first, searches the strongest English/international or original French title, and retains bounded French/original aliases.
 - Names English- and French-language films with their original title; other films use `French title (original title)`.
 - Opens qBittorrent, compares several candidates briefly, keeps only the best one, deletes duplicate partial downloads, and replaces a later dead or slow transfer automatically.
@@ -21,6 +22,7 @@ Version: **2.6.0**
 - Adds clean names, NFO metadata, posters, fanart, track labels, and English/French subtitles through a no-key, no-browser default provider.
 - Salvages verified video when separate release junk appears.
 - Executes final verification/import and removes completed or failed job state, staging, trash, AppleDouble clutter, and exact Movies Nerd-owned qBittorrent entries before reporting success.
+- Builds one compact, shallow director/title inventory during the transfer so recommendations reflect the collection and exclude movies already owned without expensive model-driven scanning.
 - Returns direct Letterboxd/SensCritique links and two movie recommendations.
 
 Requires Python 3.11+, qBittorrent 5.x, and FFmpeg/ffprobe. MKVToolNix is optional. Scripts use Python's standard library; no Node.js, Docker, scraper server, or extra qBittorrent CLI is required.
