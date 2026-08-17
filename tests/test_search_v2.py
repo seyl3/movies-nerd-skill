@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -87,12 +88,16 @@ class SearchV2Tests(unittest.TestCase):
         self.assertEqual(result[0]["torrent_url"], direct["torrent_url"])
 
     def test_provider_deadline_does_not_wait_for_slow_worker(self):
+        release = threading.Event()
+
         def slow():
-            time.sleep(0.2)
+            release.wait(1)
             return []
 
         started = time.monotonic()
-        _results, reports = search_releases.run_providers({"slow": slow}, 0.03)
-        elapsed = time.monotonic() - started
-        self.assertLess(elapsed, 0.15)
+        try:
+            _results, reports = search_releases.run_providers({"slow": slow}, 0.03)
+        finally:
+            release.set()
+        self.assertLess(time.monotonic() - started, 0.5)
         self.assertFalse(reports["slow"]["ok"])
