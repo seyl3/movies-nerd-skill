@@ -228,6 +228,8 @@ class SearchTests(unittest.TestCase):
         with (
             patch.object(search_releases, "search_knaben", return_value=candidates),
             patch.object(search_releases, "search_apibay", return_value=[]),
+            patch.object(search_releases, "search_magnetz", return_value=[]),
+            patch.object(search_releases, "search_yts", return_value=[]),
             patch.object(search_releases, "search_qbt") as qbt_search,
         ):
             results, reports, early = search_releases.search_all(
