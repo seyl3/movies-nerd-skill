@@ -2,7 +2,7 @@
 
 Movies Nerd is an opinionated all-in-one Codex skill for nontechnical film fans. Ask for one title or a batch and it starts automatically, then stays with every job until the library entries are ready.
 
-Version: **2.7.2**
+Version: **2.7.3**
 
 **Currently recommended:** use **GPT-5.6 Sol** with **High** reasoning.
 
