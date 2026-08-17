@@ -2,7 +2,7 @@
 
 Movies Nerd is an opinionated all-in-one Codex skill for nontechnical film fans. Ask for one title or a batch and it starts automatically, then stays with every job until the library entries are ready.
 
-Version: **2.7.0**
+Version: **2.7.1**
 
 **Currently recommended:** use **GPT-5.6 Sol** with **High** reasoning.
 
@@ -30,3 +30,7 @@ Requires Python 3.11+, qBittorrent 5.x, and FFmpeg/ffprobe. MKVToolNix is option
 Install the `movies-nerd` folder and ask Codex to use `$movies-nerd`. Movie and series roots are selected independently; `/Volumes/ssd/Films` is a valid movie root. See [SKILL.md](SKILL.md) for the workflow and [setup](references/setup.md) for a raw machine.
 
 MIT licensed.
+
+## Development
+
+CI validates the skill and version metadata, compiles every Python file, and runs the domain-split test suite on Python 3.11-3.14 across Linux and macOS.
