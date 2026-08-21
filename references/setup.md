@@ -17,7 +17,7 @@ No Node.js, npm packages, Docker image, browser extension, cloned scraper server
 
 ## Configure fast search
 
-No search key or account is required. `scripts/search_releases.py` queries YTS, Knaben, APIBay, and Magnetz concurrently under one shared deadline, then falls back to EXT only when necessary. Exact IMDb lookup and validated YTS direct `.torrent` metadata form the movie fast path. It uses the operating system's `curl` only if Python's TLS trust store is broken.
+No search key or account is required. `scripts/search_releases.py` queries Torrentio, YTS, Knaben, APIBay, and Magnetz concurrently under one shared deadline, then falls back to EXT only when necessary. Torrentio adds broad exact-IMDb coverage without a key, while validated YTS direct `.torrent` metadata remains the movie fast path. It uses the operating system's `curl` only if Python's TLS trust store is broken.
 
 For broader coverage, optionally configure Jackett and add its Torznab feeds to qBittorrent's search engine. qBittorrent recommends Jackett, but Movies Nerd never installs it automatically. Keep Jackett on `127.0.0.1`, configure only the indexers you trust, and store its generated API key in qBittorrent rather than this repository.
 

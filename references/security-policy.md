@@ -16,7 +16,7 @@
 ## Gate 1 — metadata before full transfer
 
 1. Add no more than three authorized candidates at once into exact hash-named paths under `.incoming/Movies Nerd/transfers` with `movies-nerd` and media-kind tags.
-2. Prefer a YTS direct `.torrent` only after `torrent_metadata.py` validates its size, canonical bencoding, info hash, file counts, lengths, and non-traversing paths. Otherwise use a fixed-tracker magnet.
+2. Prefer a YTS direct `.torrent` only after `torrent_metadata.py` validates its size, canonical bencoding, info hash, file counts, lengths, and non-traversing paths. Torrentio contributes only a validated info hash and optional bounded file index; discard its playable URLs, source trackers, web seeds, behavior filenames, and subtitle links. Otherwise use a fixed-tracker magnet.
 3. Obtain metadata under a 25-second deadline. Select only the main feature or episodes and set every companion and extra to priority zero before the live probe.
 4. Bound each live probe to 2 MiB/s and approximately 16 MiB. Choose using real byte growth, median speed, availability, peers, and metadata latency. Keep only the best candidate, then remove and verify absence of every other qBittorrent entry and exact partial-data directory. Never retain a stopped or downloading duplicate after the comparison window.
 

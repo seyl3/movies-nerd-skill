@@ -4,8 +4,8 @@ Treat speed as a correctness requirement. Under a healthy connection, target a u
 
 ## Discovery
 
-1. Run `scripts/prepare_job.py` first. It resolves the requested wording to an exact IMDb identity and canonical title before querying YTS, Knaben, APIBay, and Magnetz concurrently under one shared deadline. It uses configured qBittorrent/Torznab providers only when the fast APIs do not produce enough exact candidates and records the result directly in the new job manifest. No caller-managed search JSON file is needed.
-2. Pass the exact IMDb ID with `--imdb-id` whenever known. YTS is the movie fast path. Prefer its allowlisted direct `.torrent` URL because `torrent_metadata.py` validates its bencoding, size, paths, and info hash before qBittorrent receives it. If direct metadata fails, use the tracker-aware magnet for the same hash.
+1. Run `scripts/prepare_job.py` first. It resolves the requested wording to an exact IMDb identity and canonical title before querying Torrentio, YTS, Knaben, APIBay, and Magnetz concurrently under one shared deadline. It uses configured qBittorrent/Torznab providers only when the fast APIs do not produce enough exact candidates and records the result directly in the new job manifest. No caller-managed search JSON file is needed.
+2. Pass the exact IMDb ID with `--imdb-id` whenever known. Torrentio uses that identity as a broad no-key catalog complement, while YTS remains the direct-metadata movie fast path. Prefer its allowlisted direct `.torrent` URL because `torrent_metadata.py` validates its bencoding, size, paths, and info hash before qBittorrent receives it. If direct metadata fails, use the tracker-aware magnet for the same hash.
 3. Choose query aliases by original language, independently of the final library spelling:
 
    - English original: original English title first, then the requested French alias.
@@ -14,7 +14,7 @@ Treat speed as a correctness requirement. Under a healthy connection, target a u
 
    Query at most three deduplicated aliases. Within each provider, stop after the first alias that produces an exact title/year match so aliases do not multiply routine traffic or latency.
 4. Treat reported seed counts only as discovery hints. Zero reported seeders does not disqualify a release. The bounded live qBittorrent probe decides swarm health.
-5. Deduplicate by info hash and prefer the same hash's validated direct-metadata record. Exclude hashes remembered as dead for 72 hours. Use provider latency and recent success only as a small ranking adjustment.
+5. Deduplicate by info hash, preserve Torrentio's exact movie-file hint for multi-file packs, and prefer the same hash's validated direct-metadata record. Exclude hashes remembered as dead for 72 hours. Use provider latency and recent success only as a small ranking adjustment.
 6. Preserve up to six same-quality candidates within the displayed maximum-size envelope: two hidden waves of at most three simultaneous probes. Prefer source diversity, then distinct hashes.
 7. Use EXT only when every API candidate is unsuitable or the user explicitly requests it. Never open EXT merely to compare against a usable API result.
 
@@ -31,6 +31,6 @@ Run `scripts/run_job.py --job <manifest> --commit` for either a movie or series.
 
 ## Provider rules
 
-Direct API traffic is restricted to the fixed hosts in `search_releases.py`. Tracker URLs in constructed magnets come only from the fixed list in `qbittorrent_api.py`; never forward provider-supplied web seeds or arbitrary trackers. Optional free-key providers may be offered once, but declining must immediately continue through the no-key route.
+Direct API traffic is restricted to the fixed hosts in the bundled provider scripts. Torrentio is queried only through `torrentio.strem.fun` with an exact IMDb movie ID, a 1 MiB response limit, no key, no debrid URL, and no redirects. Tracker URLs in constructed magnets come only from the fixed list in `qbittorrent_api.py`; never forward provider-supplied web seeds or arbitrary trackers. Optional free-key providers may be offered once, but declining must immediately continue through the no-key route.
 
 Keep provider diagnostics and the `.movies-nerd/cache/provider-health.json` cache internal. Do not persist credentials, API response bodies, user paths, or browser data.
