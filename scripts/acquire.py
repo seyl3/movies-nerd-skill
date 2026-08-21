@@ -262,6 +262,7 @@ def activate_standby(job_path: Path, job: dict, client, old_hash: str) -> tuple[
     command_start(client, argparse.Namespace(
         hash=standby_hash, commit=True, include_extras=False,
         allow_oversize=False, series=job["kind"] == "series",
+        preferred_file_index=release.get("file_index"),
     ))
     transition_job(job_path, "downloading", torrent_hash=standby_hash, release=release)
     updated = update_job(job_path, {

@@ -446,6 +446,7 @@ def checked_release(value: object) -> dict:
             "seeders", "leechers", "score", "warnings", "magnet", "info_hash",
             "torrent_url", "direct_metadata", "reported_peer_health",
             "provider_reliability_bonus", "canonical_title", "language",
+            "file_index",
         )
     }
     if not str(fields["title"] or "").strip() or not str(fields["source"] or "").strip():
@@ -459,6 +460,16 @@ def checked_release(value: object) -> dict:
         raise ManifestError("search selection is outside safety bounds")
     fields["size_bytes"] = size
     fields["seeders"] = seeders
+    if fields["file_index"] is not None:
+        try:
+            if isinstance(fields["file_index"], bool):
+                raise ValueError
+            file_index = int(fields["file_index"])
+        except (TypeError, ValueError) as exc:
+            raise ManifestError("search selection has an invalid preferred file") from exc
+        if not 0 <= file_index <= 100_000:
+            raise ManifestError("search selection has an invalid preferred file")
+        fields["file_index"] = file_index
     try:
         info_hash = magnet_hash(str(fields["magnet"] or ""))
     except (QbtError, ValueError) as exc:

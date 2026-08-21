@@ -221,6 +221,7 @@ def prepare_wave(
                     continue
                 _info, _files, selected_size = configure_selection(
                     client, info_hash, series=kind == "series",
+                    preferred_file_index=candidate.get("file_index"),
                 )
                 expected_size = int(candidate.get("size_bytes") or 0)
                 tolerance = max(256 * 1024 ** 2, int(expected_size * 0.25))
@@ -332,6 +333,7 @@ def race(
             include_extras=False,
             allow_oversize=False,
             series=kind == "series",
+            preferred_file_index=winner.candidate.get("file_index"),
         ))
         return winner.candidate, {
             **result,

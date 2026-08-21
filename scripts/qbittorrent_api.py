@@ -359,7 +359,9 @@ def add_candidate(
     }
 
 
-def classify_files(files: list[dict], series: bool = False) -> dict:
+def classify_files(
+    files: list[dict], series: bool = False, preferred_file_index: int | None = None,
+) -> dict:
     if len(files) > MAX_PAYLOAD_FILES:
         return {
             "files": [],
@@ -372,6 +374,7 @@ def classify_files(files: list[dict], series: bool = False) -> dict:
                 "unsafe_reasons": [f"payload contains more than {MAX_PAYLOAD_FILES} files"],
             }],
             "main_feature": None,
+            "preferred_file_error": None,
             "episodes": [],
             "keep_indices": [],
             "skip_indices": [],
@@ -431,6 +434,23 @@ def classify_files(files: list[dict], series: bool = False) -> dict:
         if suffix in VIDEO_EXTENSIONS and not extra and not reasons:
             videos.append(record)
     main = max(videos, key=lambda item: item["size"], default=None)
+    preferred_error = None
+    if preferred_file_index is not None:
+        if series:
+            preferred_error = "a single preferred file cannot select a whole series payload"
+        else:
+            try:
+                if isinstance(preferred_file_index, bool):
+                    raise ValueError
+                preferred = int(preferred_file_index)
+                if not 0 <= preferred <= 100_000:
+                    raise ValueError
+            except (TypeError, ValueError):
+                preferred_error = "preferred movie file index is invalid"
+            else:
+                main = next((item for item in videos if item["index"] == preferred), None)
+                if main is None:
+                    preferred_error = "preferred movie file is missing, unsafe, or an extra"
     selected_videos = videos if series else ([main] if main else [])
     keep = [item["index"] for item in selected_videos]
     skip = [item["index"] for item in normalized if item["index"] not in keep]
@@ -445,6 +465,7 @@ def classify_files(files: list[dict], series: bool = False) -> dict:
         "files": normalized,
         "unsafe": unsafe,
         "main_feature": main,
+        "preferred_file_error": preferred_error,
         "episodes": videos if series else [],
         "keep_indices": keep,
         "skip_indices": skip,
@@ -470,9 +491,15 @@ def torrent_files(client: QbtClient, torrent_hash: str) -> list[dict]:
     return result
 
 
-def validate_torrent(client: QbtClient, torrent_hash: str, allow_oversize: bool = False, series: bool = False) -> tuple[dict, dict]:
+def validate_torrent(
+    client: QbtClient, torrent_hash: str, allow_oversize: bool = False,
+    series: bool = False, preferred_file_index: int | None = None,
+) -> tuple[dict, dict]:
     info = torrent_info(client, torrent_hash)
-    files = classify_files(torrent_files(client, torrent_hash), series=series)
+    files = classify_files(
+        torrent_files(client, torrent_hash), series=series,
+        preferred_file_index=preferred_file_index,
+    )
     stage_roots = tuple(root.resolve(strict=False) for root in staging_roots())
     raw_save = Path(str(info.get("save_path", ""))).resolve(strict=False)
     if not any(raw_save == root or root in raw_save.parents for root in stage_roots):
@@ -480,6 +507,8 @@ def validate_torrent(client: QbtClient, torrent_hash: str, allow_oversize: bool 
     if files["unsafe"]:
         names = ", ".join(item["name"] for item in files["unsafe"][:5])
         raise QbtError(f"torrent contains unsafe or unexpected payload files: {names}")
+    if files.get("preferred_file_error"):
+        raise QbtError(str(files["preferred_file_error"]))
     if not files["files"]:
         raise QbtError("torrent metadata is not available yet; leave it stopped briefly and inspect again")
     if not files["main_feature"]:
@@ -508,8 +537,12 @@ def command_add(client: QbtClient, args: argparse.Namespace) -> dict:
 def configure_selection(
     client: QbtClient, torrent_hash: str, *, include_extras: bool = False,
     allow_oversize: bool = False, series: bool = False,
+    preferred_file_index: int | None = None,
 ) -> tuple[dict, dict, int]:
-    info, files = validate_torrent(client, torrent_hash, allow_oversize, series=series)
+    info, files = validate_torrent(
+        client, torrent_hash, allow_oversize, series=series,
+        preferred_file_index=preferred_file_index,
+    )
     if include_extras:
         keep_indices = files["all_safe_video_indices"]
         skip_indices = [item["index"] for item in files["files"] if item["index"] not in keep_indices]
@@ -531,7 +564,10 @@ def command_inspect(client: QbtClient, args: argparse.Namespace) -> dict:
     deadline = time.monotonic() + args.wait
     while True:
         try:
-            info, files = validate_torrent(client, torrent_hash, args.allow_oversize, series=args.series)
+            info, files = validate_torrent(
+                client, torrent_hash, args.allow_oversize, series=args.series,
+                preferred_file_index=getattr(args, "preferred_file_index", None),
+            )
             break
         except QbtError as exc:
             if "metadata is not available" not in str(exc) or time.monotonic() >= deadline:
@@ -604,6 +640,7 @@ def command_start(client: QbtClient, args: argparse.Namespace) -> dict:
     info, _files, transfer_size = configure_selection(
         client, torrent_hash, include_extras=args.include_extras,
         allow_oversize=args.allow_oversize, series=args.series,
+        preferred_file_index=getattr(args, "preferred_file_index", None),
     )
     client.request("torrents/setForceStart", {"hashes": torrent_hash, "value": "true"})
     client.request("torrents/start", {"hashes": torrent_hash})
@@ -687,6 +724,7 @@ def parser() -> argparse.ArgumentParser:
     inspect.add_argument("--hash", required=True)
     inspect.add_argument("--wait", type=int, choices=range(0, 121), default=0, metavar="SECONDS")
     inspect.add_argument("--allow-oversize", action="store_true")
+    inspect.add_argument("--preferred-file-index", type=int)
     inspect.add_argument("--series", action="store_true", help="keep all non-extra episode videos")
     metadata = sub.add_parser("fetch-metadata", help="briefly fetch magnet metadata under a bounded 2 MiB/s limit")
     metadata.add_argument("--hash", required=True)
@@ -696,6 +734,7 @@ def parser() -> argparse.ArgumentParser:
     start.add_argument("--hash", required=True)
     start.add_argument("--include-extras", action="store_true")
     start.add_argument("--allow-oversize", action="store_true")
+    start.add_argument("--preferred-file-index", type=int)
     start.add_argument("--series", action="store_true", help="keep all non-extra episode videos")
     start.add_argument("--commit", action="store_true")
     stop = sub.add_parser("stop", help="stop one torrent")
