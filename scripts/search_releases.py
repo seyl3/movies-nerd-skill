@@ -22,6 +22,7 @@ from provider_health import HealthError, dead_hashes, provider_bonus, record_pro
 from qbittorrent_api import QbtError, connected_client, magnet_hash, safe_magnet
 from rank_releases import normalize
 from torrent_metadata import TorrentMetadataError, checked_torrent_url
+from torrentio_provider import TorrentioError, search_torrentio
 from title_policy import unique_titles
 
 ALLOWED_API_HOSTS = {"api.knaben.org", "apibay.org", "magnetz.eu", "movies-api.accel.li", "yts.gg"}
@@ -34,6 +35,7 @@ PROVIDER_LABELS = {
     "apibay": "APIBay",
     "magnetz": "Magnetz API",
     "yts": "YTS API",
+    "torrentio": "Torrentio",
     "qbt_torznab": "qBittorrent/Torznab",
 }
 
@@ -434,7 +436,12 @@ def deduplicate(results: list[dict]) -> list[dict]:
             safe_int(previous.get("seeders")) if previous else -1,
         )
         if previous is None or preferred > previous_preferred:
-            selected[key] = item
+            selected[key] = {
+                **item,
+                "file_index": item.get("file_index", previous.get("file_index") if previous else None),
+            }
+        elif previous.get("file_index") is None and item.get("file_index") is not None:
+            previous["file_index"] = item["file_index"]
     return list(selected.values())
 
 
@@ -542,6 +549,7 @@ def release_selection(
             "provider_reliability_bonus": reliability,
             "canonical_title": item.get("canonical_title"),
             "language": item.get("language"),
+            "file_index": item.get("file_index"),
         })
     candidates.sort(key=lambda item: (item["score"], item["seeders"]), reverse=True)
     primary = candidates[0] if candidates else None
@@ -623,7 +631,7 @@ def run_providers(providers: dict[str, object], timeout: float) -> tuple[list[di
                     items = future.result()
                     combined.extend(items)
                     reports[name] = {"ok": True, "results": len(items), "latency_ms": latency}
-                except (SearchError, QbtError, OSError) as exc:
+                except (SearchError, TorrentioError, QbtError, OSError) as exc:
                     reports[name] = {"ok": False, "error": str(exc)[:200], "latency_ms": latency}
         for future in pending:
             name = futures[future]
@@ -674,12 +682,19 @@ def search_all(
     started = time.monotonic()
     fast_timeout = min(3.5, timeout)
     aliases = unique_titles(search_titles or [], title)
-    combined, reports = run_providers({
+    providers = {
         "knaben": lambda: search_title_aliases(search_knaben, aliases, year, fast_timeout),
         "apibay": lambda: search_title_aliases(search_apibay, aliases, year, fast_timeout),
         "magnetz": lambda: search_title_aliases(search_magnetz, aliases, year, fast_timeout),
         "yts": lambda: search_yts(aliases[0], fast_timeout, imdb_id),
-    }, fast_timeout)
+    }
+    exact_imdb = str(imdb_id or "").lower()
+    if not series and re.fullmatch(r"tt\d{7,10}", exact_imdb):
+        providers["torrentio"] = lambda: search_torrentio(
+            exact_imdb, fast_timeout, title=aliases[0], year=year,
+            max_bytes=max_bytes,
+        )
+    combined, reports = run_providers(providers, fast_timeout)
     combined = deduplicate(combined)
     fast_selection = release_selection(
         combined, aliases, year, max_bytes, runtime_minutes,
