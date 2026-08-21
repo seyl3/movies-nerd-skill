@@ -2,13 +2,13 @@
 
 Movies Nerd is an opinionated all-in-one Codex skill for nontechnical film fans. Ask for one title or a batch and it starts automatically, then stays with every job until the library entries are ready.
 
-Version: **2.7.3**
+Version: **2.8.0**
 
 **Currently recommended:** use **GPT-5.6 Sol** with **High** reasoning.
 
 ## What it does
 
-- Searches YTS, Knaben, APIBay, Magnetz, configured Torznab providers, then EXT only as a last resort.
+- Searches Torrentio, YTS, Knaben, APIBay, Magnetz, configured Torznab providers, then EXT only as a last resort.
 - Runs the complete workflow through one foreground `movies-nerd download ...` command; the model never has to pass a generated job file between scripts.
 - Understands French request titles: it resolves the exact movie first, searches the strongest English/international or original French title, and retains bounded French/original aliases.
 - Names English- and French-language films with their original title; other films use `French title (original title)`.
